@@ -7,9 +7,9 @@ import SceneKit
  *
  * - ARSCNView with ARWorldTrackingConfiguration
  * - Horizontal + vertical plane detection
- * - Tap-to-place: inserts a coloured SCNBox at the hit-test point representing the product
+ * - Tap-to-place: inserts a coloured SCNBox at the hit-test point
  * - Overlay shows plane count and anchor count
- * - Gracefully falls back on simulator (ARKit not available)
+ * - Gracefully falls back on simulator (ARKit not supported)
  *
  * Flutter → MethodChannel → AppDelegate → ARViewController (this file)
  */
@@ -18,6 +18,7 @@ final class ARViewController: UIViewController, ARSCNViewDelegate, ARSessionDele
     private let productId: String
     private var sceneView: ARSCNView!
     private var statusLabel: UILabel!
+    // Accessed only on main thread — no synchronisation needed
     private var planeCount = 0
     private var anchorCount = 0
 
@@ -70,11 +71,9 @@ final class ARViewController: UIViewController, ARSCNViewDelegate, ARSessionDele
         sceneView.autoenablesDefaultLighting = true
         view.addSubview(sceneView)
 
-        // Tap gesture to place product
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         sceneView.addGestureRecognizer(tap)
 
-        // Status overlay
         statusLabel = UILabel()
         statusLabel.numberOfLines = 0
         statusLabel.font = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
@@ -99,7 +98,10 @@ final class ARViewController: UIViewController, ARSCNViewDelegate, ARSessionDele
         label.textAlignment = .center
         label.textColor = .white
         label.font = UIFont.systemFont(ofSize: 16)
-        label.text = "ARKit is not available on this device/simulator.\n\nProduct: \(productId)\n\nOn a compatible iPhone/iPad, this screen renders live camera with plane detection and lets you tap to place the product in your room."
+        label.text = "ARKit is not available on this device/simulator.\n\n" +
+            "Product: \(productId)\n\n" +
+            "On a compatible iPhone/iPad, this screen renders live camera with " +
+            "plane detection and lets you tap to place the product in your room."
         label.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(label)
         NSLayoutConstraint.activate([
@@ -115,23 +117,25 @@ final class ARViewController: UIViewController, ARSCNViewDelegate, ARSessionDele
         guard let sceneView else { return }
         let location = recognizer.location(in: sceneView)
 
-        let results = sceneView.raycastQuery(
+        // Correct ARKit raycast pattern:
+        // raycastQuery returns ARRaycastQuery? — unwrap before calling session.raycast()
+        // Calling .flatMap on Optional<ARRaycastQuery> returns Optional<[ARRaycastResult]>;
+        // calling .first on that Optional directly is a compile error in Swift.
+        guard let query = sceneView.raycastQuery(
             from: location,
             allowing: .estimatedPlane,
             alignment: .any
-        ).flatMap { sceneView.session.raycast($0) }
+        ) else { return }
 
+        let results = sceneView.session.raycast(query)
         guard let first = results.first else { return }
 
-        // Create a product-representative box node
         let box = SCNBox(width: 0.15, height: 0.4, length: 0.15, chamferRadius: 0.01)
-        box.firstMaterial?.diffuse.contents = UIColor(
-            red: 0.9, green: 0.5, blue: 0.1, alpha: 1
-        )
+        box.firstMaterial?.diffuse.contents = UIColor(red: 0.9, green: 0.5, blue: 0.1, alpha: 1)
 
         let node = SCNNode(geometry: box)
         node.simdTransform = first.worldTransform
-        node.position.y += 0.2   // lift so box sits on surface
+        node.position.y += 0.2
 
         sceneView.scene.rootNode.addChildNode(node)
         anchorCount += 1
@@ -159,7 +163,6 @@ final class ARViewController: UIViewController, ARSCNViewDelegate, ARSessionDele
 
     func renderer(_ renderer: SCNSceneRenderer, didAdd node: SCNNode, for anchor: ARAnchor) {
         guard let planeAnchor = anchor as? ARPlaneAnchor else { return }
-        planeCount += 1
 
         let plane = SCNPlane(
             width: CGFloat(planeAnchor.planeExtent.width),
@@ -172,7 +175,11 @@ final class ARViewController: UIViewController, ARSCNViewDelegate, ARSessionDele
         planeNode.eulerAngles.x = -.pi / 2
         node.addChildNode(planeNode)
 
-        DispatchQueue.main.async { self.updateStatus() }
+        // planeCount is read/written exclusively on the main thread
+        DispatchQueue.main.async {
+            self.planeCount += 1
+            self.updateStatus()
+        }
     }
 
     func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {

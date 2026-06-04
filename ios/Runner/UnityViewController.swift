@@ -5,19 +5,24 @@ import UIKit
  *
  * Architecture: Flutter → MethodChannel → AppDelegate → UnityViewController → Unity runtime
  *
- * When the Unity framework is exported and embedded via "Unity as a Library":
- *  1. Add UnityFramework.framework to the Xcode project
- *  2. Replace showReadyState() call in viewDidLoad with attachUnityFramework()
- *  3. The Unity scene receives the product ID via UnitySendMessage
+ * Runtime detection via NSClassFromString means this compiles without UnityFramework
+ * embedded. When the framework IS added, the player is loaded and lifecycle events
+ * (pause/resume/unload) are forwarded via a stored AnyObject reference so the
+ * Unity engine behaves correctly during foreground/background transitions.
  *
- * Until then this controller serves as the verified native entry-point with a
- * clear status UI showing exactly what is done and what remains.
- *
- * Flutter → MethodChannel → AppDelegate → UnityViewController (this file)
+ * To activate Unity integration:
+ *   1. Open your Unity project (2019.3+)
+ *   2. File → Build Settings → iOS → Export
+ *   3. Drag UnityFramework.framework into Xcode project
+ *   4. Set Embed & Sign in General → Frameworks, Libraries, and Embedded Content
+ *   5. Rebuild — Unity scene loads here automatically
  */
 final class UnityViewController: UIViewController {
 
     private let productId: String
+    // Stored as AnyObject so this file compiles without UnityFramework on the classpath.
+    // When the framework is linked this holds the UnityFramework singleton instance.
+    private var unityFramework: AnyObject? = nil
 
     init(productId: String) {
         self.productId = productId
@@ -26,6 +31,8 @@ final class UnityViewController: UIViewController {
     }
 
     required init?(coder: NSCoder) { fatalError("not implemented") }
+
+    // MARK: - Lifecycle
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -38,37 +45,84 @@ final class UnityViewController: UIViewController {
         }
     }
 
+    // Unity must be paused before the view disappears to let the engine
+    // complete its current frame before the render surface is invalidated
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        unityFramework?.perform(NSSelectorFromString("pause:"), with: NSNumber(value: true))
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        unityFramework?.perform(NSSelectorFromString("pause:"), with: NSNumber(value: false))
+    }
+
+    deinit {
+        unityFramework?.perform(NSSelectorFromString("unloadApplication"))
+        unityFramework = nil
+    }
+
     // MARK: - Unity detection
 
     private func isUnityFrameworkLinked() -> Bool {
         return NSClassFromString("UnityFramework") != nil
     }
 
-    // MARK: - Unity attachment (activate when framework is embedded)
+    // MARK: - Unity attachment
 
     private func attachUnityFramework() {
-        // Uncomment when UnityFramework.framework is embedded in the Xcode project:
-        //
-        // guard let frameworkBundle = Bundle(path: Bundle.main.bundlePath + "/Frameworks/UnityFramework.framework"),
-        //       let principalClass = frameworkBundle.principalClass as? NSObject.Type,
-        //       let unityFramework = principalClass.init() as? UnityFrameworkLoad else { return }
-        //
-        // unityFramework.setDataBundleId("com.unity3d.framework")
-        // unityFramework.register(self)
-        // unityFramework.runEmbedded(withArgc: CommandLine.argc,
-        //                             argv: CommandLine.unsafeArgv,
-        //                             appLaunchOpts: nil)
-        // unityFramework.sendMessageToGO(withName: "ProductBridge",
-        //                                functionName: "OnProductReceived",
-        //                                message: productId)
-        //
-        // if let unityView = unityFramework.appController()?.rootView {
-        //     view.addSubview(unityView)
-        //     unityView.frame = view.bounds
-        //     unityView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        // }
+        guard let bundlePath = Bundle.main.path(
+            forResource: "UnityFramework",
+            ofType: "framework",
+            inDirectory: "Frameworks"
+        ),
+        let bundle = Bundle(path: bundlePath),
+        let principalClass = bundle.principalClass as? NSObject.Type else {
+            showReadyState()
+            return
+        }
 
-        showReadyState() // remove this line and uncomment above when Unity is linked
+        bundle.load()
+
+        guard let fw = principalClass.value(forKey: "getInstance") as? AnyObject else {
+            showReadyState()
+            return
+        }
+
+        unityFramework = fw
+
+        // Set data bundle so Unity can locate its assets
+        fw.perform(
+            NSSelectorFromString("setDataBundleId:"),
+            with: "com.unity3d.framework"
+        )
+
+        // Register this VC as the Unity app controller delegate
+        fw.perform(NSSelectorFromString("register:"), with: self)
+
+        // Boot the Unity engine
+        fw.perform(
+            NSSelectorFromString("runEmbeddedWithArgc:argv:appLaunchOpts:"),
+            with: NSNumber(value: CommandLine.argc),
+            with: CommandLine.unsafeArgv,
+            with: nil
+        )
+
+        // Attach Unity's root view
+        if let appController = fw.perform(NSSelectorFromString("appController"))?.takeUnretainedValue(),
+           let rootView = (appController as AnyObject).perform(NSSelectorFromString("rootView"))?.takeUnretainedValue() as? UIView {
+            view.addSubview(rootView)
+            rootView.frame = view.bounds
+            rootView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        }
+
+        // Send product context into the Unity C# scene
+        fw.perform(
+            NSSelectorFromString("sendMessageToGO:functionName:message:"),
+            with: "ProductBridge",
+            with: "OnProductReceived",
+            with: productId
+        )
     }
 
     // MARK: - Fallback UI
@@ -110,12 +164,9 @@ final class UnityViewController: UIViewController {
             "2. File → Build Settings → iOS → Export",
             "3. Drag UnityFramework.framework into Xcode",
             "4. Set Embed & Sign in General → Frameworks",
-            "5. Uncomment attachUnityFramework() in\n   UnityViewController.swift",
-            "6. Rebuild — scene loads here automatically",
+            "5. Rebuild — scene loads here automatically",
         ]
-        for step in steps {
-            stack.addArrangedSubview(label(step, size: 12, color: UIColor(red: 0.47, green: 0.56, blue: 0.61, alpha: 1)))
-        }
+        for step in steps { stack.addArrangedSubview(label(step, size: 12, color: UIColor(red: 0.47, green: 0.56, blue: 0.61, alpha: 1))) }
         stack.addArrangedSubview(progressView())
         stack.addArrangedSubview(label("Integration: 65% complete", size: 11, color: .darkGray))
 
@@ -143,10 +194,8 @@ final class UnityViewController: UIViewController {
         let row = UIStackView()
         row.axis = .horizontal
         row.spacing = 8
-        let keyLabel = label(key + ":", size: 13, color: .lightGray)
-        let valLabel = label(value, size: 13, color: color, bold: true)
-        row.addArrangedSubview(keyLabel)
-        row.addArrangedSubview(valLabel)
+        row.addArrangedSubview(label(key + ":", size: 13, color: .lightGray))
+        row.addArrangedSubview(label(value, size: 13, color: color, bold: true))
         return row
     }
 

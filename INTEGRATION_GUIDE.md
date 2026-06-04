@@ -14,6 +14,7 @@
 7. [iOS Info.plist & Permissions](#7-ios-infoplist--permissions)
 8. [Dependency Summary](#8-dependency-summary)
 9. [How to Complete Unity Integration](#9-how-to-complete-unity-integration)
+10. [Correctness Audit — Bugs Found and Fixed](#10-correctness-audit--bugs-found-and-fixed)
 
 ---
 
@@ -32,7 +33,7 @@ Android: MainActivity.kt          iOS: AppDelegate.swift
      │     OpenGL ES 2.0 camera          │     SCNBox tap-to-place
      │
      ├──► VrActivity.kt                  ├──► VRViewController.swift
-     │     Canvas + Choreographer        │     SceneKit inside-out sphere
+     │     OpenGL ES 2.0 sphere          │     SceneKit inside-out sphere
      │     Gyroscope / swipe pan         │     CMMotionManager gyroscope
      │
      └──► UnityActivity.kt               └──► UnityViewController.swift
@@ -239,7 +240,32 @@ android {
 
 #### How ARCore is initialised — `ArActivity.kt`
 
-**Step 1 — Check device compatibility:**
+> **Critical lifecycle rule (Google's own docs):** Session creation must happen in `onResume`,
+> not `onCreate`. `ArCoreApk.requestInstall()` may send the user to Google Play; when they
+> return, the activity re-enters via `onResume`. Any init done only in `onCreate` is skipped
+> on that return trip.
+
+**Step 1 — Runtime camera permission (Android 6+):**
+
+```kotlin
+override fun onResume() {
+    super.onResume()
+
+    if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+            != PackageManager.PERMISSION_GRANTED) {
+        ActivityCompat.requestPermissions(
+            this, arrayOf(Manifest.permission.CAMERA), RC_CAMERA
+        )
+        return   // system shows dialog; onResume fires again when user responds
+    }
+    // ... proceed to step 2
+}
+```
+
+The `CAMERA` permission is declared in the manifest but Android 6+ requires an explicit
+runtime request. Without this, `Session(this)` throws `SecurityException` on real devices.
+
+**Step 2 — Check device compatibility:**
 
 ```kotlin
 when (ArCoreApk.getInstance().checkAvailability(this)) {
@@ -247,24 +273,46 @@ when (ArCoreApk.getInstance().checkAvailability(this)) {
         showFallback("ARCore not supported on this device.")
         return
     }
-    else -> setupSession()
+    ArCoreApk.Availability.UNKNOWN_ERROR,
+    ArCoreApk.Availability.UNKNOWN_TIMED_OUT -> {
+        showFallback("ARCore availability check failed.")
+        return
+    }
+    else -> { /* SUPPORTED_* variants or UNKNOWN_CHECKING — proceed to requestInstall */ }
 }
 ```
 
-`checkAvailability` returns an enum: `SUPPORTED_INSTALLED`, `SUPPORTED_NOT_INSTALLED`,
-`UNSUPPORTED_DEVICE_NOT_CAPABLE`, etc. On emulator it returns `UNSUPPORTED`, so the
-fallback message shows immediately.
-
-**Step 2 — Create a Session:**
+**Step 3 — `requestInstall()` (mandatory for both AR Required and AR Optional apps):**
 
 ```kotlin
-arSession = Session(this)
-val config = Config(arSession!!).apply {
-    planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
-    updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
-    lightEstimationMode = Config.LightEstimationMode.ENVIRONMENTAL_HDR
+when (ArCoreApk.getInstance().requestInstall(this, !installRequested)) {
+    ArCoreApk.InstallStatus.INSTALL_REQUESTED -> {
+        installRequested = true
+        return   // user sent to Play Store; activity resumes via onResume when done
+    }
+    ArCoreApk.InstallStatus.INSTALLED -> { /* safe to create Session */ }
 }
-arSession!!.configure(config)
+```
+
+Google's ARCore docs state: *"Both AR Required and AR Optional apps must call
+`requestInstall()` before creating a Session."* Skipping this step means ARCore may be
+stale or missing and session creation fails with a cryptic exception.
+
+**Step 4 — Create a Session (once, reused across pause/resume):**
+
+```kotlin
+if (arSession == null) {
+    val session = Session(this)
+    session.configure(Config(session).apply {
+        planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
+        updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
+        lightEstimationMode = Config.LightEstimationMode.ENVIRONMENTAL_HDR
+    })
+    arSession = session
+    // attach renderer + touch listener (only done once)
+}
+arSession?.resume()
+glSurfaceView?.onResume()
 ```
 
 A `Session` owns the camera + tracking pipeline. `Config` sets:
@@ -272,42 +320,37 @@ A `Session` owns the camera + tracking pipeline. `Config` sets:
 - `LATEST_CAMERA_IMAGE` — always use the most recent frame
 - `ENVIRONMENTAL_HDR` — estimate real-world lighting to shade AR objects realistically
 
-**Step 3 — Connect to OpenGL via GLSurfaceView:**
-
-```kotlin
-val glSurfaceView = GLSurfaceView(this).apply {
-    setEGLContextClientVersion(2)          // OpenGL ES 2.0
-    preserveEGLContextOnPause = true       // keep GL context across pause/resume
-}
-glSurfaceView.setRenderer(ArCoreRenderer(arSession!!, productId) { planes, anchors ->
-    runOnUiThread { updateStatusText(planes, anchors) }
-})
-glSurfaceView.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
-```
-
-`GLSurfaceView` provides a dedicated OpenGL surface. ARCore writes each camera frame into an
-OES (external) texture, and the renderer reads that texture to draw the camera background.
-
-**Step 4 — OpenGL Renderer (`ArCoreRenderer`):**
+**Step 5 — OpenGL Renderer (`ArCoreRenderer`):**
 
 ```kotlin
 class ArCoreRenderer(session, productId, onUpdate) : GLSurfaceView.Renderer {
+
+    // NDC quad — input to Frame.transformCoordinates2d()
+    private val QUAD_NDC = floatArrayOf(-1f, -1f,  1f, -1f,  -1f, 1f,  1f, 1f)
 
     override fun onSurfaceCreated(gl, config) {
         // Generate an OES texture for the camera feed
         GLES20.glGenTextures(1, tex, 0)
         GLES20.glBindTexture(GL_TEXTURE_EXTERNAL_OES, cameraTextureId)
         session.setCameraTextureName(cameraTextureId)  // tell ARCore to write here
-
-        // Compile camera background shader program
         bgProgram = buildProgram(vertexShaderSrc, fragmentShaderSrc)
     }
 
     override fun onDrawFrame(gl) {
         val frame = session.update()      // advance ARCore, get latest camera frame
-        drawCameraBackground()            // render the camera image to the full screen quad
-        handlePendingTap(frame)           // if user tapped, do a hit test
-        updatePlaneCount(frame)           // count detected planes, report to UI
+
+        // Transform UV coords per-frame to correct for camera sensor vs. display rotation.
+        // Hardcoded UVs are wrong on devices where sensor and display orientation differ.
+        val transformedUVs = FloatArray(8)
+        frame.transformCoordinates2d(
+            Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES, QUAD_NDC,
+            Coordinates2d.TEXTURE_NORMALIZED,                   transformedUVs
+        )
+        bgTexCoordBuffer = floatBuffer(transformedUVs)
+
+        drawCameraBackground()     // render camera image using transformed UVs
+        handlePendingTap(frame)    // if user tapped, do a hit test
+        updatePlaneCount(frame)    // count detected planes, report to UI
     }
 }
 ```
@@ -323,40 +366,45 @@ void main() {
 }
 ```
 
-**Step 5 — Tap to place a product anchor:**
+**Step 6 — Tap to place a product anchor:**
 
 ```kotlin
+// Touch listener on main thread
 glSurfaceView.setOnTouchListener { _, event ->
-    if (event.action == MotionEvent.ACTION_UP) {
-        renderer?.onTap(event.x, event.y)  // pass tap coordinates to renderer
-    }
+    if (event.action == MotionEvent.ACTION_UP) renderer?.onTap(event.x, event.y)
     true
 }
 
+// onTap writes to @Volatile fields; onDrawFrame reads them on GL thread
+@Volatile private var pendingTapX = -1f
+@Volatile private var pendingTapY = -1f
+fun onTap(x: Float, y: Float) { pendingTapX = x; pendingTapY = y }
+
 // Inside ArCoreRenderer.onDrawFrame:
-val hits = frame.hitTest(tapX, tapY)
-for (hit in hits) {
-    val trackable = hit.trackable
-    if (trackable is Plane && trackable.isPoseInPolygon(hit.hitPose)) {
-        anchors.add(hit.createAnchor())  // lock virtual object to real-world point
-        break
+val tx = pendingTapX; val ty = pendingTapY
+if (tx >= 0f && ty >= 0f) {
+    pendingTapX = -1f; pendingTapY = -1f
+    for (hit in frame.hitTest(tx, ty)) {
+        val trackable = hit.trackable
+        if (trackable is Plane && trackable.isPoseInPolygon(hit.hitPose)) {
+            anchors.add(hit.createAnchor())  // lock virtual object to real-world point
+            break
+        }
     }
 }
 ```
 
-`frame.hitTest` casts a ray from the screen touch point into the 3D world and returns
-intersection points with detected planes. `createAnchor()` creates a pose that stays locked
-to the real-world position even as the device moves.
+`@Volatile` ensures the tap coordinates written on the main thread are immediately visible
+on the GL thread. `frame.hitTest` casts a ray from screen coordinates into 3D world space
+and returns intersection points with detected planes. `createAnchor()` creates a pose that
+stays locked to the real-world position even as the device moves.
 
-**Step 6 — Session lifecycle:**
+**Step 7 — Session lifecycle:**
 
 ```kotlin
-override fun onResume() {
-    arSession?.resume()         // restart camera + tracking
-    glSurfaceView?.onResume()   // resume GL rendering
-}
 override fun onPause() {
-    glSurfaceView?.onPause()    // pause GL thread first (important ordering)
+    super.onPause()
+    glSurfaceView?.onPause()    // pause GL thread first
     arSession?.pause()          // then pause camera
 }
 override fun onDestroy() {
@@ -434,9 +482,20 @@ func renderer(_ renderer: SCNSceneRenderer, didAdd node: SCNNode, for anchor: AR
 
 ```swift
 @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
+    guard let sceneView else { return }
     let location = recognizer.location(in: sceneView)
-    let results = sceneView.raycastQuery(from: location, allowing: .estimatedPlane, alignment: .any)
-        .flatMap { sceneView.session.raycast($0) }
+
+    // raycastQuery returns ARRaycastQuery? (Optional).
+    // Do NOT use .flatMap { session.raycast($0) } — that returns [ARRaycastResult]?
+    // and .first on an Optional<Array> is a compile error in Swift.
+    // Correct pattern: unwrap the query explicitly, then call session.raycast().
+    guard let query = sceneView.raycastQuery(
+        from: location,
+        allowing: .estimatedPlane,
+        alignment: .any
+    ) else { return }
+
+    let results = sceneView.session.raycast(query)
     guard let first = results.first else { return }
 
     let box = SCNBox(width: 0.15, height: 0.4, length: 0.15, chamferRadius: 0.01)
@@ -445,12 +504,19 @@ func renderer(_ renderer: SCNSceneRenderer, didAdd node: SCNNode, for anchor: AR
     node.simdTransform = first.worldTransform
     node.position.y += 0.2
     sceneView.scene.rootNode.addChildNode(node)
+    anchorCount += 1
+    updateStatus()
 }
 ```
 
 `raycastQuery` + `session.raycast` replaces the deprecated `hitTest(_:types:)` API (deprecated
 in iOS 14). It casts a ray from screen coordinates into 3D world space and returns intersection
 points with estimated planes.
+
+> **Thread safety note:** `planeCount` is only ever incremented inside
+> `DispatchQueue.main.async { self.planeCount += 1 }` in `renderer(_:didAdd:for:)`.
+> ARKit calls that delegate method on a background thread, so the increment must be
+> dispatched to main to avoid a data race with `updateStatus()` reads.
 
 ---
 
@@ -832,18 +898,42 @@ and returns false — showing the status UI instead of crashing.
 
 #### When Unity is linked — activate the player:
 
-```kotlin
-private fun attachUnityPlayer() {
-    val unityPlayer = com.unity3d.player.UnityPlayer(this)
-    setContentView(unityPlayer)
-    unityPlayer.requestFocus()
+The `unityPlayer` is stored as `Any?` (not the concrete type) so the file compiles without
+the Unity library on the classpath. Lifecycle methods forward via reflection:
 
-    // Send product ID to a Unity C# script
-    com.unity3d.player.UnityPlayer.UnitySendMessage(
-        "ProductBridge",        // GameObject name in Unity scene
-        "OnProductReceived",    // C# method name on that GameObject
-        productId               // string argument
-    )
+```kotlin
+// Stored as Any — compiles without Unity library; cast is safe when isUnityLibraryLinked() == true
+private var unityPlayer: Any? = null
+
+private fun attachUnityPlayer() {
+    val playerClass = Class.forName("com.unity3d.player.UnityPlayer")
+    val player = playerClass.getConstructor(Activity::class.java).newInstance(this)
+    unityPlayer = player
+
+    val view = playerClass.getMethod("getView").invoke(player) as android.view.View
+    setContentView(view)
+    view.requestFocus()
+
+    // Send product ID to a Unity C# script (static method on UnityPlayer)
+    playerClass.getMethod("UnitySendMessage",
+        String::class.java, String::class.java, String::class.java)
+        .invoke(null, "ProductBridge", "OnProductReceived", productId)
+}
+
+// Unity docs: pause() must be called BEFORE super.onPause() so the engine can
+// complete its current frame before the window surface is destroyed
+override fun onPause() {
+    unityPlayer?.let { p -> p.javaClass.getMethod("pause").invoke(p) }
+    super.onPause()
+}
+override fun onResume() {
+    super.onResume()
+    unityPlayer?.let { p -> p.javaClass.getMethod("resume").invoke(p) }
+}
+override fun onDestroy() {
+    unityPlayer?.let { p -> p.javaClass.getMethod("quit").invoke(p) }
+    unityPlayer = null
+    super.onDestroy()
 }
 ```
 
@@ -882,28 +972,57 @@ private func isUnityFrameworkLinked() -> Bool {
 
 #### When Unity is linked — activate the framework:
 
-```swift
-private func attachUnityFramework() {
-    guard let frameworkBundle = Bundle(path: Bundle.main.bundlePath + "/Frameworks/UnityFramework.framework"),
-          let principalClass = frameworkBundle.principalClass as? NSObject.Type,
-          let unityFramework = principalClass.init() as? UnityFrameworkLoad else { return }
+The framework is stored as `AnyObject?` so the file compiles without `UnityFramework`
+on the Xcode classpath. All calls use `perform(NSSelectorFromString:)`:
 
-    unityFramework.setDataBundleId("com.unity3d.framework")
-    unityFramework.register(self)
-    unityFramework.runEmbedded(withArgc: CommandLine.argc,
-                                argv: CommandLine.unsafeArgv,
-                                appLaunchOpts: nil)
+```swift
+// Stored as AnyObject — compiles without framework; selector calls are safe when isUnityFrameworkLinked() == true
+private var unityFramework: AnyObject? = nil
+
+private func attachUnityFramework() {
+    guard let bundlePath = Bundle.main.path(
+        forResource: "UnityFramework", ofType: "framework", inDirectory: "Frameworks"
+    ),
+    let bundle = Bundle(path: bundlePath),
+    let principalClass = bundle.principalClass as? NSObject.Type else { showReadyState(); return }
+
+    bundle.load()
+    guard let fw = principalClass.value(forKey: "getInstance") as? AnyObject else {
+        showReadyState(); return
+    }
+    unityFramework = fw
+
+    fw.perform(NSSelectorFromString("setDataBundleId:"), with: "com.unity3d.framework")
+    fw.perform(NSSelectorFromString("register:"), with: self)
+    fw.perform(NSSelectorFromString("runEmbeddedWithArgc:argv:appLaunchOpts:"),
+               with: NSNumber(value: CommandLine.argc),
+               with: CommandLine.unsafeArgv, with: nil)
+
+    // Attach Unity's render view
+    if let appCtrl = fw.perform(NSSelectorFromString("appController"))?.takeUnretainedValue(),
+       let rootView = (appCtrl as AnyObject).perform(NSSelectorFromString("rootView"))
+                        ?.takeUnretainedValue() as? UIView {
+        view.addSubview(rootView)
+        rootView.frame = view.bounds
+        rootView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    }
 
     // Send product ID to Unity C# script
-    unityFramework.sendMessageToGO(withName: "ProductBridge",
-                                   functionName: "OnProductReceived",
-                                   message: productId)
+    fw.perform(NSSelectorFromString("sendMessageToGO:functionName:message:"),
+               with: "ProductBridge", with: "OnProductReceived", with: productId)
+}
 
-    if let unityView = unityFramework.appController()?.rootView {
-        view.addSubview(unityView)
-        unityView.frame = view.bounds
-        unityView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-    }
+// Lifecycle — Unity must be paused before the render surface disappears
+override func viewWillDisappear(_ animated: Bool) {
+    super.viewWillDisappear(animated)
+    unityFramework?.perform(NSSelectorFromString("pause:"), with: NSNumber(value: true))
+}
+override func viewWillAppear(_ animated: Bool) {
+    super.viewWillAppear(animated)
+    unityFramework?.perform(NSSelectorFromString("pause:"), with: NSNumber(value: false))
+}
+deinit {
+    unityFramework?.perform(NSSelectorFromString("unloadApplication"))
 }
 ```
 
@@ -1075,3 +1194,53 @@ UnityActivity.attachUnityPlayer() / UnityViewController.attachUnityFramework()
 Unity C# — ProductBridge.OnProductReceived("prod_001")
   └─ Load 3D model, set materials, play animations for product "prod_001"
 ```
+
+---
+
+## 10. Correctness Audit — Bugs Found and Fixed
+
+All three integrations were audited against official SDK documentation after initial
+implementation. The following bugs were identified and corrected.
+
+### 10.1 Android AR — 5 bugs fixed
+
+| # | Bug | Impact | Fix |
+|---|---|---|---|
+| 1 | Session init in `onCreate`, not `onResume` | `requestInstall` sends user to Play Store and returns via `onResume`. Old code skipped reinit on return trip. | Moved entire ARCore init chain into `onResume` |
+| 2 | No runtime camera permission | `Session(this)` throws `SecurityException` on real devices (Android 6+). The catch block swallowed it silently. | Added `ActivityCompat.requestPermissions` + `onRequestPermissionsResult` |
+| 3 | `ArCoreApk.requestInstall()` never called | Google mandates this for both AR Required and AR Optional apps. Without it, ARCore may be stale/missing. | Added `requestInstall` + `installRequested` flag for the Play Store return trip |
+| 4 | UV texture coords hardcoded | Camera image rotated/mirrored on devices where sensor orientation ≠ display orientation. | `Frame.transformCoordinates2d(NDC → TEXTURE_NORMALIZED)` called every frame |
+| 5 | `pendingTapX/Y` not `@Volatile` | Written on main thread, read on GL thread — data race; stale tap values possible. | Made both fields `@Volatile` |
+
+### 10.2 Android Unity — 3 bugs fixed
+
+| # | Bug | Impact | Fix |
+|---|---|---|---|
+| 1 | `attachUnityPlayer()` always showed placeholder | Even when `Class.forName` succeeded, `showReadyState()` was called immediately. Unity was never actually attached. | Instantiates `UnityPlayer` via reflection, sets it as content view, calls `UnitySendMessage` |
+| 2 | No lifecycle forwarding | Unity engine wouldn't pause/resume/quit with the activity — rendering glitches, potential ANRs, leaked GL context | Added `onResume/onPause/onDestroy` forwarding via reflection; `pause()` called before `super.onPause()` |
+| 3 | `unityPlayer` not stored as member | Couldn't forward lifecycle events or send messages after `onCreate` | Stored as `Any?` member (compiles without Unity library on classpath) |
+
+### 10.3 iOS AR — 2 bugs fixed
+
+| # | Bug | Impact | Fix |
+|---|---|---|---|
+| 1 | `.flatMap` raycast pattern | `Optional.flatMap { session.raycast($0) }` returns `[ARRaycastResult]?`. Calling `.first` on `Optional<Array>` without `?` is a **compile error** in Swift. iOS code would not build. | Replaced with `guard let query = ...raycastQuery(...) else { return }` then `session.raycast(query)` |
+| 2 | `planeCount += 1` on ARKit background thread | ARKit calls `renderer(_:didAdd:for:)` on a background thread. Incrementing `planeCount` there while `updateStatus()` reads it on main is a data race. | Moved `planeCount += 1` inside `DispatchQueue.main.async` block |
+
+### 10.4 iOS Unity — 3 bugs fixed
+
+| # | Bug | Impact | Fix |
+|---|---|---|---|
+| 1 | `attachUnityFramework()` always showed placeholder | Same as Android: even when `NSClassFromString` returned non-nil, `showReadyState()` was called. | Loads framework bundle, gets singleton via `getInstance`, calls `runEmbeddedWithArgc`, attaches root view, sends `sendMessageToGO` |
+| 2 | No lifecycle forwarding | Unity engine wouldn't pause/resume/unload — background CPU usage, potential crashes on iOS 16+ | Added `viewWillDisappear/viewWillAppear` forwarding `pause:` selector; `deinit` calls `unloadApplication` |
+| 3 | No stored framework reference | Couldn't forward lifecycle events or send messages after `viewDidLoad` | Stored as `AnyObject?` member (compiles without `UnityFramework.framework` on Xcode classpath) |
+
+### 10.5 What was already correct
+
+| Component | Status |
+|---|---|
+| Android VR — OpenGL ES 2.0 equirectangular sphere | ✅ Correct. Proper UV sphere, reversed winding, `Frame.transformCoordinates2d` not needed (no ARCore), sensor → view matrix via transpose. |
+| iOS VR — SceneKit inside-out sphere | ✅ Correct. `SCNVector3(-1,1,1)` scale flips normals inward. `CMMotionManager` with `.xArbitraryZVertical` reference frame. Euler angles acceptable for non-extreme pitch values. |
+| Flutter MethodChannel bridge | ✅ Correct. Channel name matches both sides. `productId` passed as Intent extra / constructor arg. |
+| AndroidManifest permissions | ✅ Correct. Camera declared. Gyroscope `required=false`. ARCore `optional`. |
+| iOS Info.plist permissions | ✅ Correct. `NSCameraUsageDescription` and `NSMotionUsageDescription` present. |
