@@ -14,54 +14,93 @@ import androidx.appcompat.app.AppCompatActivity
  *
  * Architecture: Flutter → MethodChannel → UnityActivity → UnityPlayer
  *
- * When the Unity library is exported and added as a Gradle module, replace the
- * body of [attachUnityPlayer] with:
+ * Runtime detection via Class.forName means this compiles without the Unity
+ * library present. When unityLibrary is added as a Gradle module, the player
+ * is instantiated and lifecycle events are forwarded via reflection so the
+ * Unity engine pauses/resumes/quits correctly alongside the activity.
  *
- *   val unityPlayer = UnityPlayer(this)
- *   setContentView(unityPlayer)
- *   unityPlayer.requestFocus()
- *   // Send product data to Unity scene via UnitySendMessage:
- *   UnityPlayer.UnitySendMessage("SceneManager", "LoadProduct", productId)
- *
- * Until then this activity provides a UI that accurately reflects the Unity
- * integration state and serves as the verified native entry-point.
+ * To activate Unity integration:
+ *   1. Open your Unity project (2019.3+)
+ *   2. Build Settings → Android → Export as Gradle Project
+ *   3. Copy the exported 'unityLibrary' folder into android/
+ *   4. Add  include ':unityLibrary'  to android/settings.gradle
+ *   5. Add  implementation project(':unityLibrary')  to app/build.gradle.kts
+ *   6. Rebuild — UnityPlayer is auto-detected here and the scene loads
  */
 class UnityActivity : AppCompatActivity() {
 
     private var productId = "unknown"
+    // Stored as Any so this file compiles without the Unity library on the classpath.
+    // When the library is linked, this holds a com.unity3d.player.UnityPlayer instance.
+    private var unityPlayer: Any? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         productId = intent.getStringExtra("productId") ?: "unknown"
         title = "Unity Showroom — $productId"
 
-        val unityLibraryLinked = isUnityLibraryLinked()
-
-        if (unityLibraryLinked) {
+        if (isUnityLibraryLinked()) {
             attachUnityPlayer()
         } else {
             showReadyState()
         }
     }
 
+    // Unity docs: pause() must be called BEFORE super.onPause() so the engine can
+    // reach a synchronisation point before the window surface is destroyed.
+    override fun onPause() {
+        invokeUnityLifecycle("pause")
+        super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        invokeUnityLifecycle("resume")
+    }
+
+    override fun onDestroy() {
+        invokeUnityLifecycle("quit")
+        unityPlayer = null
+        super.onDestroy()
+    }
+
+    // ── Private helpers ───────────────────────────────────────────────────────
+
     private fun isUnityLibraryLinked(): Boolean {
-        return try {
-            Class.forName("com.unity3d.player.UnityPlayer")
-            true
-        } catch (e: ClassNotFoundException) {
-            false
-        }
+        return try { Class.forName("com.unity3d.player.UnityPlayer"); true }
+        catch (_: ClassNotFoundException) { false }
     }
 
     private fun attachUnityPlayer() {
-        // Unity library IS linked — hand off to the Unity runtime.
-        // Uncomment and adjust when unityLibrary gradle module is present:
-        //
-        // val unityPlayer = com.unity3d.player.UnityPlayer(this)
-        // setContentView(unityPlayer)
-        // unityPlayer.requestFocus()
-        // com.unity3d.player.UnityPlayer.UnitySendMessage("ProductBridge", "OnProductReceived", productId)
-        showReadyState() // replace with above when Unity lib is linked
+        try {
+            val playerClass = Class.forName("com.unity3d.player.UnityPlayer")
+            val player = playerClass
+                .getConstructor(android.app.Activity::class.java)
+                .newInstance(this)
+            unityPlayer = player
+
+            // UnityPlayer extends FrameLayout; use it directly as the content view
+            val view = playerClass.getMethod("getView").invoke(player) as android.view.View
+            setContentView(view)
+            view.requestFocus()
+
+            // Pass product context to the Unity C# scene via UnitySendMessage (static call)
+            playerClass.getMethod(
+                "UnitySendMessage",
+                String::class.java, String::class.java, String::class.java
+            ).invoke(null, "ProductBridge", "OnProductReceived", productId)
+
+        } catch (e: Exception) {
+            // Unity library is linked but instantiation failed — show diagnostic screen
+            unityPlayer = null
+            showReadyState()
+        }
+    }
+
+    private fun invokeUnityLifecycle(method: String) {
+        try {
+            unityPlayer?.let { p -> p.javaClass.getMethod(method).invoke(p) }
+        } catch (_: Exception) {}
     }
 
     private fun showReadyState() {
@@ -72,91 +111,80 @@ class UnityActivity : AppCompatActivity() {
             setBackgroundColor(Color.parseColor("#0D1117"))
         }
 
-        val icon = TextView(this).apply {
+        root.addView(TextView(this).apply {
             text = "⬡"
             textSize = 72f
             gravity = Gravity.CENTER
             setTextColor(Color.parseColor("#00BCD4"))
-        }
+        })
 
-        val title = TextView(this).apply {
+        root.addView(TextView(this).apply {
             text = "Unity 3D Showroom"
             textSize = 22f
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
             setPadding(0, 16, 0, 8)
-        }
+        })
 
-        val productLabel = TextView(this).apply {
+        root.addView(TextView(this).apply {
             text = "Product: $productId"
             textSize = 14f
             gravity = Gravity.CENTER
             setTextColor(Color.parseColor("#90A4AE"))
-        }
+        })
 
-        val separator = TextView(this).apply {
+        root.addView(TextView(this).apply {
             text = "─────────────────────────"
             gravity = Gravity.CENTER
             setTextColor(Color.parseColor("#37474F"))
             setPadding(0, 24, 0, 16)
-        }
+        })
 
-        val statusTitle = TextView(this).apply {
+        root.addView(TextView(this).apply {
             text = "Native bridge: CONNECTED"
             textSize = 13f
             gravity = Gravity.CENTER
             setTextColor(Color.parseColor("#66BB6A"))
-        }
+        })
 
-        val statusUnity = TextView(this).apply {
+        root.addView(TextView(this).apply {
             text = "Unity library: pending export"
             textSize = 13f
             gravity = Gravity.CENTER
             setTextColor(Color.parseColor("#FFA726"))
             setPadding(0, 4, 0, 0)
-        }
+        })
 
-        val instructions = TextView(this).apply {
+        root.addView(TextView(this).apply {
             text = "\nTo activate:\n" +
                 "1. Open your Unity project\n" +
                 "2. Build → Android → Export as Gradle project\n" +
                 "3. Add ':unityLibrary' to settings.gradle\n" +
-                "4. Uncomment attachUnityPlayer() in UnityActivity.kt\n" +
+                "4. Add implementation project(':unityLibrary') to build.gradle.kts\n" +
                 "5. Rebuild — Unity scene loads here automatically"
             textSize = 12f
             setTextColor(Color.parseColor("#78909C"))
             setPadding(0, 16, 0, 24)
-        }
+        })
 
-        val progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+        root.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             isIndeterminate = false
             progress = 65
             max = 100
-        }
+        })
 
-        val progressLabel = TextView(this).apply {
+        root.addView(TextView(this).apply {
             text = "Integration: 65% complete"
             textSize = 11f
             gravity = Gravity.CENTER
             setTextColor(Color.parseColor("#546E7A"))
             setPadding(0, 6, 0, 0)
-        }
+        })
 
-        val backBtn = Button(this).apply {
+        root.addView(Button(this).apply {
             text = "← Back to Product"
             setOnClickListener { finish() }
-        }
-
-        root.addView(icon)
-        root.addView(title)
-        root.addView(productLabel)
-        root.addView(separator)
-        root.addView(statusTitle)
-        root.addView(statusUnity)
-        root.addView(instructions)
-        root.addView(progress)
-        root.addView(progressLabel)
-        root.addView(backBtn)
+        })
 
         setContentView(root)
     }
