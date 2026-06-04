@@ -1,0 +1,33 @@
+name: ar_ecommerce_app
+description: "AR/VR/Unity ecommerce app — Flutter talks to native AR (ARCore/ARKit), VR (Cardboard/SceneKit), and Unity via MethodChannel."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.1
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+
+  # State management for ecommerce (cart, products)
+  provider: ^6.1.2
+
+  # Declarative navigation
+  go_router: ^14.6.1
+
+  # Local persistence for cart
+  shared_preferences: ^2.3.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/
