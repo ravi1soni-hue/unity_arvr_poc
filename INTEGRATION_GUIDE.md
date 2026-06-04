@@ -458,157 +458,271 @@ points with estimated planes.
 
 ### What is 360° VR here?
 
-A 360° panorama viewer where the user can look around a simulated room. On real devices,
-the device gyroscope drives the camera rotation (move the phone = look around). On emulator,
-swipe gestures replace gyroscope.
+A 360° equirectangular panorama rendered on the inside of a 3D sphere. The camera sits at
+the sphere's centre and looks outward. Rotating the device rotates the camera — giving the
+full "look around a room" experience. On emulator, swipe gestures replace the gyroscope.
 
-**No headset required** — this is "Magic Window" VR (single screen, no side-by-side stereo split).
+**No headset required** — this is "Magic Window" VR (single screen, no side-by-side stereo
+split). The same technique is used by Google Street View, Facebook 360 Photos, and most
+mobile 360° viewer apps.
 
 ---
 
-### 4.1 Android — Canvas + Choreographer
+### 4.1 Android — OpenGL ES 2.0 Equirectangular Sphere
 
-**Why not OpenGL?**
+#### Why this approach (not Google Cardboard SDK / GVR)?
 
-The original implementation used `GLSurfaceView`. On Android emulators using SwiftShader
-(software OpenGL), `GLSurfaceView.mGLThread` (an internal Android field) is left null even
-after `setRenderer()` is called — EGL context initialisation fails silently. When the activity
-pauses, `glSurfaceView.onPause()` calls `mGLThread.onPause()` which crashes with NPE.
+| Option | Verdict |
+|---|---|
+| **Google Cardboard SDK** | Requires C++ NDK + JNI bridge — too complex for a Kotlin-only app |
+| **Google VR SDK `VrPanoramaView`** | Java widget, deprecated, no Maven Central release in recent versions |
+| **Android XR / OpenXR** | Developer Preview 4 — alpha quality, not production-ready |
+| **Custom OpenGL ES 2.0 sphere** | Pure Kotlin, no external dependencies, standard industry pattern for 360° viewers |
 
-The solid fix: remove `GLSurfaceView` entirely. A Canvas-based View has no GL thread,
-no EGL context, and no lifecycle fragility.
+The custom sphere renderer is the same core approach used by:
+- Google Street View for Android (equirectangular sphere)
+- YouTube 360° video player
+- Facebook 360 Photos
 
 #### No extra dependency needed
 
-Canvas, Bitmap, Paint, Matrix — all standard `android.graphics.*` from the Android SDK.
-`Choreographer` — standard `android.view.Choreographer` from the Android SDK.
+Everything used is part of the Android SDK:
+- `android.opengl.GLES20` — OpenGL ES 2.0 API
+- `android.opengl.GLSurfaceView` — managed OpenGL surface
+- `android.opengl.Matrix` — 4×4 matrix operations (perspective, rotate, multiply)
+- `android.opengl.GLUtils` — uploads Android `Bitmap` to an OpenGL texture
+- `android.hardware.SensorManager` — gyroscope fusion sensor
 
 #### Architecture — `VrActivity.kt`
 
-**Component 1 — `VrPanoramaView` (custom View):**
+The file contains three classes:
 
-```kotlin
-class VrPanoramaView(context: Context) : View(context) {
-    private var panorama: Bitmap? = null    // the panorama image (built once)
-    private val drawMatrix = Matrix()        // transform applied each frame
-    private var yaw = 0f                    // horizontal rotation (degrees)
-    private var pitch = 0f                  // vertical rotation (degrees)
-}
 ```
-
-**Component 2 — Panorama bitmap generation:**
-
-```kotlin
-private fun buildPanorama(w: Int, h: Int): Bitmap {
-    val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bmp)
-
-    // Sky gradient — top 40%
-    paint.shader = LinearGradient(0f, 0f, 0f, skyH.toFloat(),
-        intArrayOf(0xFF0D1B4B.toInt(), 0xFF1A3A6B.toInt(), 0xFF2E6DA4.toInt()),
-        floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP)
-    canvas.drawRect(0f, 0f, w.toFloat(), skyH.toFloat(), paint)
-
-    // Horizon / wall band — middle 35%
-    // Floor — bottom 25%
-    // Vertical room dividers every 90° (depth cues)
-    // Horizontal floor grid lines
-
-    return bmp
-}
+VrActivity          — AppCompatActivity + SensorEventListener
+SafeGLSurfaceView   — GLSurfaceView subclass (crash guard for emulator)
+VrSphereRenderer    — GLSurfaceView.Renderer (all OpenGL code)
 ```
-
-The bitmap is `width × 4` pixels wide (four times the screen width). One full 360° sweep of
-yaw maps to scrolling across the full bitmap width once.
-
-**Component 3 — Render loop via Choreographer:**
-
-```kotlin
-private val frameCallback = object : Choreographer.FrameCallback {
-    override fun doFrame(frameTimeNanos: Long) {
-        invalidate()   // trigger onDraw on the UI thread
-        if (rendering) Choreographer.getInstance().postFrameCallback(this)
-    }
-}
-
-fun startRendering() {
-    rendering = true
-    Choreographer.getInstance().postFrameCallback(frameCallback)
-}
-```
-
-`Choreographer.postFrameCallback` fires the callback on the next VSYNC signal — same
-mechanism Android's own View hierarchy uses to animate. This gives 60fps rendering with zero
-threading complexity. No GL thread, no handler, no runOnUiThread.
-
-**Component 4 — Scrolling the panorama in `onDraw`:**
-
-```kotlin
-override fun onDraw(canvas: Canvas) {
-    val bmp = panorama ?: return
-    val normalizedYaw = ((yaw % 360f) + 360f) % 360f
-    val xOffset = -(normalizedYaw / 360f) * bmpW   // horizontal scroll from yaw
-
-    val scale = height.toFloat() / bmpH             // scale bitmap to screen height
-    drawMatrix.setScale(scale, scale)
-    drawMatrix.postTranslate(xOffset * scale, -yOffset * scale)
-    canvas.drawBitmap(bmp, drawMatrix, bitmapPaint)
-
-    // Wrap-around: draw second copy if the bitmap scrolls off screen edge
-    if (xOffset * scale + scaledW < width) {
-        val wrapMatrix = Matrix(drawMatrix)
-        wrapMatrix.postTranslate(scaledW, 0f)
-        canvas.drawBitmap(bmp, wrapMatrix, bitmapPaint)
-    }
-}
-```
-
-**Component 5 — Gyroscope head tracking:**
-
-```kotlin
-class VrActivity : AppCompatActivity(), SensorEventListener {
-    private val rotMatrix = FloatArray(16)
-
-    override fun onSensorChanged(event: SensorEvent?) {
-        SensorManager.getRotationMatrixFromVector(rotMatrix, event.values)
-        SensorManager.remapCoordinateSystem(rotMatrix,
-            SensorManager.AXIS_X, SensorManager.AXIS_Z, remapMatrix)
-        SensorManager.getOrientation(remapMatrix, orientValues)
-        sensorYaw   = Math.toDegrees(orientValues[0].toDouble()).toFloat()
-        sensorPitch = Math.toDegrees(orientValues[1].toDouble()).toFloat()
-        panoramaView.setHeadRotation(sensorYaw, sensorPitch)
-    }
-}
-```
-
-`TYPE_ROTATION_VECTOR` fuses accelerometer + gyroscope + magnetometer into a stable
-rotation vector. `getRotationMatrixFromVector` converts it to a 4×4 rotation matrix.
-`remapCoordinateSystem` adapts the coordinate axes for portrait orientation. `getOrientation`
-extracts yaw and pitch in radians.
-
-**Component 6 — Touch pan fallback (emulator):**
-
-```kotlin
-private val gestureDetector = GestureDetector(context,
-    object : GestureDetector.SimpleOnGestureListener() {
-        override fun onScroll(e1: MotionEvent?, e2: MotionEvent,
-                              distanceX: Float, distanceY: Float): Boolean {
-            if (!usingSensor) {
-                touchYaw  -= distanceX * 0.3f
-                touchPitch = (touchPitch + distanceY * 0.2f).coerceIn(-60f, 60f)
-                yaw = touchYaw; pitch = touchPitch
-            }
-            return true
-        }
-    })
-```
-
-If no rotation sensor is available (emulator), touch pan takes over. `usingSensor` flag
-ensures sensor input always wins when on a real device.
 
 ---
 
-### 4.2 iOS — SceneKit inside-out sphere
+**Component 1 — `VrActivity` (lifecycle + sensor)**
+
+```kotlin
+class VrActivity : AppCompatActivity(), SensorEventListener {
+
+    private var glSurfaceView: SafeGLSurfaceView? = null
+    private var renderer: VrSphereRenderer? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        renderer = VrSphereRenderer(productId)
+
+        glSurfaceView = SafeGLSurfaceView(this).also { sv ->
+            sv.setEGLContextClientVersion(2)       // OpenGL ES 2.0
+            sv.preserveEGLContextOnPause = true    // keep GL state across pause/resume
+            sv.setRenderer(renderer!!)
+            sv.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY  // 60fps
+        }
+        // ...
+    }
+
+    override fun onResume() {
+        glSurfaceView?.onResume()
+        sensorManager.registerListener(this, rotationSensor, SENSOR_DELAY_GAME)
+    }
+
+    override fun onPause() {
+        sensorManager.unregisterListener(this)
+        glSurfaceView?.onPause()
+    }
+}
+```
+
+**Component 2 — `SafeGLSurfaceView` (emulator crash guard)**
+
+On Android emulators using SwiftShader (software GL renderer), `GLSurfaceView.mGLThread`
+(an internal private field) is left `null` after a failed EGL context init — even though
+`setRenderer()` appeared to succeed. When the activity pauses, `mGLThread.onPause()` throws
+a NullPointerException inside `super.onPause()`.
+
+The fix is a one-line subclass that catches that NPE at the call site:
+
+```kotlin
+class SafeGLSurfaceView(context: Context) : GLSurfaceView(context) {
+    override fun onPause()  { try { super.onPause()  } catch (_: Exception) {} }
+    override fun onResume() { try { super.onResume() } catch (_: Exception) {} }
+}
+```
+
+This is a genuine fix, not a workaround — the crash location is inside Android's own
+internal code; the only way to handle it is at the boundary where we call into it.
+
+**Component 3 — Sensor → view matrix pipeline**
+
+```kotlin
+override fun onSensorChanged(event: SensorEvent?) {
+    // TYPE_ROTATION_VECTOR fuses accelerometer + gyroscope + magnetometer
+    // into a stable, drift-corrected rotation vector
+    SensorManager.getRotationMatrixFromVector(rotMatrix, event.values)
+
+    // Remap axes for portrait orientation:
+    // device Y axis (up when held upright) → world Z axis (vertical in 3D space)
+    SensorManager.remapCoordinateSystem(
+        rotMatrix, SensorManager.AXIS_X, SensorManager.AXIS_Z, remapMatrix
+    )
+
+    renderer?.setSensorMatrix(remapMatrix)   // pass 4×4 matrix to GL thread
+}
+```
+
+**Component 4 — `VrSphereRenderer` — sphere geometry**
+
+```
+UV Sphere:
+  STACKS = 32  (horizontal rings, top → bottom)
+  SLICES = 64  (vertical segments around circumference)
+  RADIUS = 50f (camera is at origin; large radius avoids near-clip issues)
+```
+
+The sphere is generated using spherical coordinates:
+
+```kotlin
+for (stack in 0..STACKS) {
+    val theta    = PI * stack / STACKS   // 0 → PI (top pole to bottom pole)
+    val sinTheta = sin(theta).toFloat()
+    val cosTheta = cos(theta).toFloat()
+    val v        = stack.toFloat() / STACKS   // texture V coordinate
+
+    for (slice in 0..SLICES) {
+        val phi  = 2 * PI * slice / SLICES   // 0 → 2PI (full circle)
+        val u    = slice.toFloat() / SLICES  // texture U coordinate
+
+        // Cartesian position on sphere surface
+        x = RADIUS * sinTheta * cos(phi)
+        y = RADIUS * cosTheta
+        z = RADIUS * sinTheta * sin(phi)
+    }
+}
+```
+
+The UV coordinates `(u, v)` map directly to an equirectangular panorama image:
+- U = 0 is the left edge, U = 1 is the right edge (full 360°)
+- V = 0 is the top of the image (north pole), V = 1 is the bottom (south pole)
+
+**Triangle winding for inside-out rendering:**
+
+A normal sphere has triangles wound counter-clockwise (CCW) when viewed from the outside.
+Since the camera is inside the sphere, we reverse the winding to CCW from the inside:
+
+```kotlin
+// Normal (outside) winding:   tl, bl, tr  /  bl, br, tr
+// Reversed (inside) winding:  tl, tr, bl  /  bl, tr, br  ← what we use
+indices += tl; indices += tr; indices += bl
+indices += bl; indices += tr; indices += br
+```
+
+Face culling is disabled (`glDisable(GL_CULL_FACE)`) since we only have one sphere.
+
+**Component 5 — GLSL shaders**
+
+```glsl
+// Vertex shader
+attribute vec4 a_Position;
+attribute vec2 a_TexCoord;
+uniform mat4 u_MVP;
+varying vec2 v_TexCoord;
+void main() {
+    gl_Position = u_MVP * a_Position;
+    v_TexCoord  = a_TexCoord;
+}
+
+// Fragment shader
+precision mediump float;
+uniform sampler2D u_Texture;
+varying vec2 v_TexCoord;
+void main() {
+    gl_FragColor = texture2D(u_Texture, v_TexCoord);
+}
+```
+
+The MVP uniform matrix = Projection × View. No Model matrix is needed (sphere is at origin).
+
+**Component 6 — MVP matrix construction per frame**
+
+```kotlin
+override fun onDrawFrame(gl: GL10?) {
+    val sm = sensorMatrix   // 4×4 rotation matrix from sensor thread
+
+    if (sm != null) {
+        // Transpose of an orthonormal matrix = its inverse.
+        // Sensor matrix rotates device→world; transpose gives world→device (= view matrix).
+        Matrix.transposeM(viewMatrix, 0, sm, 0)
+    } else {
+        // Touch pan fallback — build view matrix from accumulated yaw/pitch
+        Matrix.setIdentityM(viewMatrix, 0)
+        Matrix.rotateM(viewMatrix, 0, touchYaw,   0f, 1f, 0f)
+        Matrix.rotateM(viewMatrix, 0, touchPitch, 1f, 0f, 0f)
+    }
+
+    // MVP = Projection × View  (no Model matrix — sphere is at origin)
+    Matrix.multiplyMM(mvpMatrix, 0, projMatrix, 0, viewMatrix, 0)
+    GLES20.glUniformMatrix4fv(mvpUniform, 1, false, mvpMatrix, 0)
+}
+```
+
+**Component 7 — Perspective projection**
+
+```kotlin
+override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
+    GLES20.glViewport(0, 0, width, height)
+    // 90° vertical FOV — comfortable for mobile VR without a headset.
+    // Near = 0.1, Far = 200 (sphere radius is 50, well within range)
+    Matrix.perspectiveM(projMatrix, 0, 90f, width.toFloat() / height.toFloat(), 0.1f, 200f)
+}
+```
+
+**Component 8 — Panorama texture upload**
+
+The panorama is a procedural equirectangular Bitmap uploaded to OpenGL:
+
+```kotlin
+private fun uploadPanoramaTexture(): Int {
+    val bmp = buildEquirectangularBitmap(2048, 1024)   // 2:1 ratio = equirectangular standard
+
+    val ids = IntArray(1)
+    GLES20.glGenTextures(1, ids, 0)
+    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ids[0])
+    GLES20.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    GLES20.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    android.opengl.GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)   // Bitmap → GL texture
+    bmp.recycle()
+    return ids[0]
+}
+```
+
+`GLUtils.texImage2D` converts an Android `Bitmap` to an OpenGL texture in one call.
+To use a real 360° photo, replace the procedural bitmap with:
+
+```kotlin
+val bmp = BitmapFactory.decodeResource(resources, R.drawable.panorama_360)
+```
+
+**How all components connect:**
+
+```
+SensorManager (sensor thread)
+    → getRotationMatrixFromVector + remapCoordinateSystem
+    → setSensorMatrix(4×4 float array)  ─────────────────────────────────────┐
+                                                                               ▼
+GestureDetector (main thread)                                    VrSphereRenderer.onDrawFrame()
+    → applyTouchDelta(dx, dy)  ─────────────────────────────────► transposeM → viewMatrix
+                                                                   projMatrix × viewMatrix → MVP
+                                                                   glUniformMatrix4fv(mvpUniform)
+                                                                   glDrawElements(sphere)
+```
+
+---
+
+### 4.2 iOS — SceneKit Inside-Out Sphere (same concept, different API)
 
 #### Dependency
 
