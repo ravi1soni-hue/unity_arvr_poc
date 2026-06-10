@@ -2,23 +2,11 @@ import UIKit
 import ARKit
 import SceneKit
 
-/**
- * Real ARKit view controller.
- *
- * - ARSCNView with ARWorldTrackingConfiguration
- * - Horizontal + vertical plane detection
- * - Tap-to-place: inserts a coloured SCNBox at the hit-test point
- * - Overlay shows plane count and anchor count
- * - Gracefully falls back on simulator (ARKit not supported)
- *
- * Flutter → MethodChannel → AppDelegate → ARViewController (this file)
- */
 final class ARViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
 
     private let productId: String
     private var sceneView: ARSCNView!
     private var statusLabel: UILabel!
-    // Accessed only on main thread — no synchronisation needed
     private var planeCount = 0
     private var anchorCount = 0
 
@@ -28,13 +16,15 @@ final class ARViewController: UIViewController, ARSCNViewDelegate, ARSessionDele
         title = "AR Preview"
     }
 
-    required init?(coder: NSCoder) { fatalError("not implemented") }
-
-    // MARK: - Lifecycle
+    required init?(coder: NSLayoutCoder) { fatalError("not implemented") }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
+
+        navigationItem.leftBarButtonItem = UIBarButtonItem(
+            title: "Close", style: .done, target: self, action: #selector(close)
+        )
         navigationItem.rightBarButtonItem = UIBarButtonItem(
             title: "Reset", style: .plain, target: self, action: #selector(resetSession)
         )
@@ -46,12 +36,15 @@ final class ARViewController: UIViewController, ARSCNViewDelegate, ARSessionDele
         }
     }
 
+    @objc private func close() {
+        dismiss(animated: true)
+    }
+
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         guard ARWorldTrackingConfiguration.isSupported else { return }
         let config = ARWorldTrackingConfiguration()
         config.planeDetection = [.horizontal, .vertical]
-        config.environmentTexturing = .automatic
         sceneView?.session.run(config, options: [.resetTracking, .removeExistingAnchors])
     }
 
@@ -60,14 +53,11 @@ final class ARViewController: UIViewController, ARSCNViewDelegate, ARSessionDele
         sceneView?.session.pause()
     }
 
-    // MARK: - Setup
-
     private func setupARView() {
         sceneView = ARSCNView(frame: view.bounds)
         sceneView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         sceneView.delegate = self
         sceneView.session.delegate = self
-        sceneView.showsStatistics = false
         sceneView.autoenablesDefaultLighting = true
         view.addSubview(sceneView)
 
@@ -97,47 +87,28 @@ final class ARViewController: UIViewController, ARSCNViewDelegate, ARSessionDele
         label.numberOfLines = 0
         label.textAlignment = .center
         label.textColor = .white
-        label.font = UIFont.systemFont(ofSize: 16)
-        label.text = "ARKit is not available on this device/simulator.\n\n" +
-            "Product: \(productId)\n\n" +
-            "On a compatible iPhone/iPad, this screen renders live camera with " +
-            "plane detection and lets you tap to place the product in your room."
+        label.text = "ARKit is not supported on this device."
         label.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(label)
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
-            label.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
+            label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             label.centerYAnchor.constraint(equalTo: view.centerYAnchor),
         ])
     }
 
-    // MARK: - Interaction
-
     @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
-        guard let sceneView else { return }
+        guard let sceneView = sceneView else { return }
         let location = recognizer.location(in: sceneView)
-
-        // Correct ARKit raycast pattern:
-        // raycastQuery returns ARRaycastQuery? — unwrap before calling session.raycast()
-        // Calling .flatMap on Optional<ARRaycastQuery> returns Optional<[ARRaycastResult]>;
-        // calling .first on that Optional directly is a compile error in Swift.
-        guard let query = sceneView.raycastQuery(
-            from: location,
-            allowing: .estimatedPlane,
-            alignment: .any
-        ) else { return }
-
+        guard let query = sceneView.raycastQuery(from: location, allowing: .estimatedPlane, alignment: .any) else { return }
         let results = sceneView.session.raycast(query)
         guard let first = results.first else { return }
 
-        let box = SCNBox(width: 0.15, height: 0.4, length: 0.15, chamferRadius: 0.01)
-        box.firstMaterial?.diffuse.contents = UIColor(red: 0.9, green: 0.5, blue: 0.1, alpha: 1)
-
+        let box = SCNBox(width: 0.1, height: 0.1, length: 0.1, chamferRadius: 0)
+        box.firstMaterial?.diffuse.contents = UIColor.orange
         let node = SCNNode(geometry: box)
         node.simdTransform = first.worldTransform
-        node.position.y += 0.2
-
         sceneView.scene.rootNode.addChildNode(node)
+
         anchorCount += 1
         updateStatus()
     }
@@ -147,46 +118,18 @@ final class ARViewController: UIViewController, ARSCNViewDelegate, ARSessionDele
         anchorCount = 0
         planeCount = 0
         updateStatus()
-        let config = ARWorldTrackingConfiguration()
-        config.planeDetection = [.horizontal, .vertical]
-        sceneView?.session.run(config, options: [.resetTracking, .removeExistingAnchors])
     }
 
     private func updateStatus() {
-        let hint = planeCount == 0
-            ? "Point camera at a flat surface…"
-            : "Tap a surface to place \(productId)"
-        statusLabel?.text = " Product: \(productId) | Planes: \(planeCount) | Placed: \(anchorCount)\n \(hint) "
+        statusLabel?.text = "Product: \(productId) | Planes: \(planeCount) | Objects: \(anchorCount)"
     }
-
-    // MARK: - ARSCNViewDelegate — plane visualisation
 
     func renderer(_ renderer: SCNSceneRenderer, didAdd node: SCNNode, for anchor: ARAnchor) {
-        guard let planeAnchor = anchor as? ARPlaneAnchor else { return }
-
-        let plane = SCNPlane(
-            width: CGFloat(planeAnchor.planeExtent.width),
-            height: CGFloat(planeAnchor.planeExtent.height)
-        )
-        plane.firstMaterial?.diffuse.contents = UIColor.systemBlue.withAlphaComponent(0.3)
-        plane.firstMaterial?.isDoubleSided = true
-
-        let planeNode = SCNNode(geometry: plane)
-        planeNode.eulerAngles.x = -.pi / 2
-        node.addChildNode(planeNode)
-
-        // planeCount is read/written exclusively on the main thread
-        DispatchQueue.main.async {
-            self.planeCount += 1
-            self.updateStatus()
+        if anchor is ARPlaneAnchor {
+            DispatchQueue.main.async {
+                self.planeCount += 1
+                self.updateStatus()
+            }
         }
-    }
-
-    func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
-        guard let planeAnchor = anchor as? ARPlaneAnchor,
-              let planeNode = node.childNodes.first,
-              let plane = planeNode.geometry as? SCNPlane else { return }
-        plane.width  = CGFloat(planeAnchor.planeExtent.width)
-        plane.height = CGFloat(planeAnchor.planeExtent.height)
     }
 }

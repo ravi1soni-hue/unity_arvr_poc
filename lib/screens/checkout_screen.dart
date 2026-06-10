@@ -20,7 +20,12 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   String _paymentMethod = 'UPI';
   bool _placing = false;
 
-  final List<String> _paymentOptions = ['UPI', 'Credit / Debit Card', 'Net Banking', 'Cash on Delivery'];
+  final List<String> _paymentOptions = [
+    'UPI',
+    'Credit / Debit Card',
+    'Net Banking',
+    'Cash on Delivery'
+  ];
 
   @override
   void dispose() {
@@ -46,68 +51,81 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
-            _SectionHeader('Delivery Address'),
+            const _SectionHeader('Delivery Address'),
             const SizedBox(height: 10),
             _field(_nameCtrl, 'Full Name', Icons.person_outline),
             const SizedBox(height: 10),
-            _field(_phoneCtrl, 'Phone Number', Icons.phone_outlined, keyboardType: TextInputType.phone),
+            _field(_phoneCtrl, 'Phone Number', Icons.phone_outlined,
+                keyboardType: TextInputType.phone),
             const SizedBox(height: 10),
             _field(_addressCtrl, 'Address', Icons.home_outlined, maxLines: 2),
             const SizedBox(height: 10),
             Row(
               children: [
-                Expanded(child: _field(_cityCtrl, 'City', Icons.location_city_outlined)),
+                Expanded(
+                    child: _field(_cityCtrl, 'City', Icons.location_city_outlined)),
                 const SizedBox(width: 10),
-                Expanded(child: _field(_pincodeCtrl, 'Pincode', Icons.pin_drop_outlined, keyboardType: TextInputType.number)),
+                Expanded(
+                    child: _field(_pincodeCtrl, 'Pincode', Icons.pin_drop_outlined,
+                        keyboardType: TextInputType.number)),
               ],
             ),
             const SizedBox(height: 20),
-            _SectionHeader('Payment Method'),
+            const _SectionHeader('Payment Method'),
             const SizedBox(height: 10),
-            RadioGroup<String>(
-              groupValue: _paymentMethod,
-              onChanged: (v) => setState(() => _paymentMethod = v!),
-              child: Column(
-                children: _paymentOptions.map((opt) => RadioListTile<String>(
-                  title: Text(opt),
-                  value: opt,
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                )).toList(),
-              ),
+            Column(
+              children: _paymentOptions
+                  .map((opt) => RadioListTile<String>(
+                        title: Text(opt),
+                        value: opt,
+                        groupValue: _paymentMethod,
+                        onChanged: (v) {
+                          if (v != null) setState(() => _paymentMethod = v);
+                        },
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                      ))
+                  .toList(),
             ),
             const SizedBox(height: 20),
-            _SectionHeader('Order Summary'),
+            const _SectionHeader('Order Summary'),
             const SizedBox(height: 10),
             ...cart.items.map((item) => Padding(
-              padding: const EdgeInsets.symmetric(vertical: 4),
-              child: Row(
-                children: [
-                  Expanded(child: Text('${item.product.name} × ${item.quantity}')),
-                  Text('₹${item.totalPrice.toStringAsFixed(0)}',
-                      style: const TextStyle(fontWeight: FontWeight.w500)),
-                ],
-              ),
-            )),
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(
+                    children: [
+                      Expanded(
+                          child: Text('${item.product.name} × ${item.quantity}')),
+                      Text('₹${item.totalPrice.toStringAsFixed(0)}',
+                          style: const TextStyle(fontWeight: FontWeight.w500)),
+                    ],
+                  ),
+                )),
             const Divider(height: 20),
-            Row(
+            const Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text('Delivery', style: TextStyle(color: Colors.grey)),
-                const Text('FREE', style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
+                Text('Delivery', style: TextStyle(color: Colors.grey)),
+                Text('FREE',
+                    style: TextStyle(
+                        color: Colors.green, fontWeight: FontWeight.bold)),
               ],
             ),
             const SizedBox(height: 4),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text('Total', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
+                Text('Total',
+                    style: Theme.of(context)
+                        .textTheme
+                        .titleMedium
+                        ?.copyWith(fontWeight: FontWeight.bold)),
                 Text(
                   '₹${cart.totalAmount.toStringAsFixed(0)}',
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
-                    color: Theme.of(context).colorScheme.primary,
-                  ),
+                        fontWeight: FontWeight.bold,
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
                 ),
               ],
             ),
@@ -116,7 +134,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               width: double.infinity,
               child: FilledButton.icon(
                 icon: _placing
-                    ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white))
                     : const Icon(Icons.check_circle_outline_rounded),
                 label: Text(_placing ? 'Placing Order…' : 'Place Order'),
                 onPressed: _placing ? null : () => _placeOrder(context, cart),
@@ -169,7 +191,10 @@ class _SectionHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     return Text(
       title,
-      style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+      style: Theme.of(context)
+          .textTheme
+          .titleMedium
+          ?.copyWith(fontWeight: FontWeight.bold),
     );
   }
 }

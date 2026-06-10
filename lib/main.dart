@@ -8,11 +8,21 @@ import 'screens/product_detail_screen.dart';
 import 'screens/cart_screen.dart';
 import 'screens/checkout_screen.dart';
 import 'screens/order_success_screen.dart';
+import 'services/product_service.dart';
+import 'services/native_bridge.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  NativeBridge.initialize();
+
   runApp(
-    ChangeNotifierProvider(
-      create: (_) => CartProvider(),
+    MultiProvider(
+      providers: [
+        Provider(create: (_) => ProductService()),
+        ChangeNotifierProvider(
+          create: (context) => CartProvider()..loadCart(),
+        ),
+      ],
       child: const FloorFlowApp(),
     ),
   );

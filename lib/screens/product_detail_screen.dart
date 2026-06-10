@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import '../models/product.dart';
 import '../providers/cart_provider.dart';
 import '../services/native_bridge.dart';
+import '../services/product_service.dart';
 import '../widgets/cart_badge.dart';
 
 class ProductDetailScreen extends StatefulWidget {
@@ -17,44 +19,70 @@ class ProductDetailScreen extends StatefulWidget {
 class _ProductDetailScreenState extends State<ProductDetailScreen> {
   String _nativeStatus = '';
   bool _loading = false;
+  bool _fetchingProduct = true;
+  StreamSubscription? _nativeSubscription;
 
-  late final Product _product;
-  bool _found = false;
+  Product? _product;
 
   @override
   void initState() {
     super.initState();
-    try {
-      _product = Product.catalog.firstWhere((p) => p.id == widget.productId);
-      _found = true;
-    } catch (_) {
-      _found = false;
-    }
+    _fetchProduct();
 
-    NativeBridge.channel.setMethodCallHandler((call) async {
-      if (call.method == 'onNativeMessage' && mounted) {
-        final payload = Map<String, dynamic>.from(call.arguments as Map);
+    _nativeSubscription = NativeBridge.messages.listen((data) {
+      if (mounted && data['productId'] == widget.productId) {
         setState(() {
-          _nativeStatus = payload['message'] ?? '';
+          _nativeStatus = data['message'] ?? '';
           _loading = false;
         });
       }
-      return null;
     });
   }
 
+  @override
+  void dispose() {
+    _nativeSubscription?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _fetchProduct() async {
+    final productService = context.read<ProductService>();
+    final p = await productService.getProductById(widget.productId);
+    if (mounted) {
+      setState(() {
+        _product = p;
+        _fetchingProduct = false;
+      });
+    }
+  }
+
   Future<void> _launch(Future<void> Function() action, String label) async {
-    setState(() { _loading = true; _nativeStatus = 'Opening $label…'; });
+    setState(() {
+      _loading = true;
+      _nativeStatus = 'Opening $label…';
+    });
     try {
       await action();
     } catch (e) {
-      setState(() { _nativeStatus = 'Error: $e'; _loading = false; });
+      if (mounted) {
+        setState(() {
+          _nativeStatus = 'Error: $e';
+          _loading = false;
+        });
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!_found) {
+    if (_fetchingProduct) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Loading...')),
+        body: const Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    if (_product == null) {
       return Scaffold(
         appBar: AppBar(title: const Text('Product Not Found')),
         body: const Center(child: Text('Product not found.')),
@@ -62,11 +90,11 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
     }
 
     final cart = context.watch<CartProvider>();
-    final inCart = cart.isInCart(_product.id);
+    final inCart = cart.isInCart(_product!.id);
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(_product.name),
+        title: Text(_product!.name),
         backgroundColor: Theme.of(context).colorScheme.primaryContainer,
         actions: [CartBadge(onPressed: () => context.push('/cart'))],
       ),
@@ -74,7 +102,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _ProductHero(product: _product),
+            _ProductHero(product: _product!),
             Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
@@ -84,19 +112,22 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                   const SizedBox(height: 12),
                   _ratingRow(context),
                   const Divider(height: 24),
-                  _section(context, 'Description', _product.description),
+                  _section(context, 'Description', _product!.description),
                   const SizedBox(height: 12),
-                  _section(context, 'Specifications', _product.specs),
+                  _section(context, 'Specifications', _product!.specs),
                   const SizedBox(height: 8),
-                  _section(context, 'Room Fit', _product.roomFit),
+                  _section(context, 'Room Fit', _product!.roomFit),
                   const Divider(height: 24),
                   _NativeLaunchSection(
-                    product: _product,
+                    product: _product!,
                     loading: _loading,
                     status: _nativeStatus,
-                    onAr: () => _launch(() => NativeBridge.openArScreen(_product.id), 'AR View'),
-                    onVr: () => _launch(() => NativeBridge.openVrScreen(_product.id), 'VR View'),
-                    onUnity: () => _launch(() => NativeBridge.openUnityScene(_product.id), 'Unity Showroom'),
+                    onAr: () =>
+                        _launch(() => NativeBridge.openArScreen(_product!.id), 'AR View'),
+                    onVr: () =>
+                        _launch(() => NativeBridge.openVrScreen(_product!.id), 'VR View'),
+                    onUnity: () =>
+                        _launch(() => NativeBridge.openUnityScene(_product!.id), 'Unity Showroom'),
                   ),
                   const SizedBox(height: 80),
                 ],
@@ -108,9 +139,9 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       bottomNavigationBar: _BottomBar(
         inCart: inCart,
         onAdd: () {
-          context.read<CartProvider>().addItem(_product);
+          context.read<CartProvider>().addItem(_product!);
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('${_product.name} added to cart')),
+            SnackBar(content: Text('${_product!.name} added to cart')),
           );
         },
         onGoToCart: () => context.push('/cart'),
@@ -119,46 +150,53 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
   }
 
   Widget _priceRow(BuildContext context) => Row(
-    children: [
-      Text(
-        '₹${_product.price.toStringAsFixed(0)}',
-        style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-          fontWeight: FontWeight.bold,
-          color: Theme.of(context).colorScheme.primary,
-        ),
-      ),
-      const Spacer(),
-      Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.secondaryContainer,
-          borderRadius: BorderRadius.circular(6),
-        ),
-        child: Text(_product.category, style: Theme.of(context).textTheme.labelMedium),
-      ),
-    ],
-  );
+        children: [
+          Text(
+            '₹${_product!.price.toStringAsFixed(0)}',
+            style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                  fontWeight: FontWeight.bold,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+          ),
+          const Spacer(),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.secondaryContainer,
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text(_product!.category, style: Theme.of(context).textTheme.labelMedium),
+          ),
+        ],
+      );
 
   Widget _ratingRow(BuildContext context) => Row(
-    children: [
-      ...List.generate(5, (i) => Icon(
-        i < _product.rating.floor() ? Icons.star_rounded : Icons.star_outline_rounded,
-        size: 18, color: Colors.amber[700],
-      )),
-      const SizedBox(width: 6),
-      Text('${_product.rating}', style: Theme.of(context).textTheme.bodyMedium),
-      Text(' · ${_product.reviewCount} reviews', style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.grey)),
-    ],
-  );
+        children: [
+          ...List.generate(
+              5,
+              (i) => Icon(
+                    i < _product!.rating.floor()
+                        ? Icons.star_rounded
+                        : Icons.star_outline_rounded,
+                    size: 18,
+                    color: Colors.amber[700],
+                  )),
+          const SizedBox(width: 6),
+          Text('${_product!.rating}', style: Theme.of(context).textTheme.bodyMedium),
+          Text(' · ${_product!.reviewCount} reviews',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.grey)),
+        ],
+      );
 
   Widget _section(BuildContext context, String title, String body) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      Text(title, style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold)),
-      const SizedBox(height: 4),
-      Text(body, style: Theme.of(context).textTheme.bodyMedium),
-    ],
-  );
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title,
+              style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 4),
+          Text(body, style: Theme.of(context).textTheme.bodyMedium),
+        ],
+      );
 }
 
 class _ProductHero extends StatelessWidget {
@@ -183,10 +221,14 @@ class _ProductHero extends StatelessWidget {
 
   IconData _iconFor(String cat) {
     switch (cat) {
-      case 'Lighting': return Icons.lightbulb_outline_rounded;
-      case 'Fans': return Icons.air_rounded;
-      case 'Furniture': return Icons.chair_alt_rounded;
-      default: return Icons.inventory_2_rounded;
+      case 'Lighting':
+        return Icons.lightbulb_outline_rounded;
+      case 'Fans':
+        return Icons.air_rounded;
+      case 'Furniture':
+        return Icons.chair_alt_rounded;
+      default:
+        return Icons.inventory_2_rounded;
     }
   }
 }
@@ -225,7 +267,8 @@ class _NativeLaunchSection extends StatelessWidget {
         const SizedBox(height: 14),
         Row(
           children: [
-            Expanded(child: _LaunchButton(
+            Expanded(
+                child: _LaunchButton(
               icon: Icons.view_in_ar_rounded,
               label: 'AR View',
               subtitle: 'ARCore / ARKit',
@@ -233,7 +276,8 @@ class _NativeLaunchSection extends StatelessWidget {
               onTap: loading ? null : onAr,
             )),
             const SizedBox(width: 10),
-            Expanded(child: _LaunchButton(
+            Expanded(
+                child: _LaunchButton(
               icon: Icons.vrpano_rounded,
               label: 'VR 360°',
               subtitle: 'Cardboard / SceneKit',
@@ -241,7 +285,8 @@ class _NativeLaunchSection extends StatelessWidget {
               onTap: loading ? null : onVr,
             )),
             const SizedBox(width: 10),
-            Expanded(child: _LaunchButton(
+            Expanded(
+                child: _LaunchButton(
               icon: Icons.auto_awesome_rounded,
               label: 'Unity 3D',
               subtitle: 'Unity Showroom',
@@ -261,7 +306,9 @@ class _NativeLaunchSection extends StatelessWidget {
             ),
             child: Row(
               children: [
-                if (loading) const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
+                if (loading)
+                  const SizedBox(
+                      width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
                 if (loading) const SizedBox(width: 8),
                 Expanded(child: Text(status, style: Theme.of(context).textTheme.bodySmall)),
               ],
@@ -304,8 +351,11 @@ class _LaunchButton extends StatelessWidget {
           children: [
             Icon(icon, color: color, size: 26),
             const SizedBox(height: 4),
-            Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: color)),
-            Text(subtitle, style: const TextStyle(fontSize: 9, color: Colors.grey), textAlign: TextAlign.center),
+            Text(label,
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: color)),
+            Text(subtitle,
+                style: const TextStyle(fontSize: 9, color: Colors.grey),
+                textAlign: TextAlign.center),
           ],
         ),
       ),

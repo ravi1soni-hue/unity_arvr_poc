@@ -2,16 +2,6 @@ import UIKit
 import SceneKit
 import CoreMotion
 
-/**
- * Real SceneKit 360° VR view controller.
- *
- * - Renders an inside-out SCNSphere with a procedural gradient material
- * - Uses CMMotionManager (gyroscope) for head-tracking rotation
- * - Falls back to pan gesture on simulator / devices without motion
- * - Overlay shows product info
- *
- * Flutter → MethodChannel → AppDelegate → VRViewController (this file)
- */
 final class VRViewController: UIViewController {
 
     private let productId: String
@@ -29,14 +19,21 @@ final class VRViewController: UIViewController {
 
     required init?(coder: NSCoder) { fatalError("not implemented") }
 
-    // MARK: - Lifecycle
-
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
+
+        navigationItem.leftBarButtonItem = UIBarButtonItem(
+            title: "Close", style: .done, target: self, action: #selector(close)
+        )
+
         setupScene()
         setupOverlay()
         setupInput()
+    }
+
+    @objc private func close() {
+        dismiss(animated: true)
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -49,85 +46,45 @@ final class VRViewController: UIViewController {
         motionManager?.stopDeviceMotionUpdates()
     }
 
-    // MARK: - Scene
-
     private func setupScene() {
         let scene = SCNScene()
-
-        // Camera at origin looking into the sphere
         cameraNode = SCNNode()
         cameraNode.camera = SCNCamera()
-        cameraNode.camera?.zNear = 0.1
-        cameraNode.camera?.zFar = 100
-        cameraNode.camera?.fieldOfView = 90
         scene.rootNode.addChildNode(cameraNode)
 
-        // Inside-out sphere (negative X scale flips normals so we see the interior)
         let sphere = SCNSphere(radius: 10)
-        sphere.segmentCount = 48
-        sphere.firstMaterial = makeGradientMaterial()
+        sphere.firstMaterial?.isDoubleSided = true
+        sphere.firstMaterial?.diffuse.contents = makeGradientImage()
 
         let sphereNode = SCNNode(geometry: sphere)
-        sphereNode.scale = SCNVector3(-1, 1, 1)
+        sphereNode.scale = SCNVector3(-1, 1, 1) // Invert for inside-out
         scene.rootNode.addChildNode(sphereNode)
-
-        let ambientNode = SCNNode()
-        ambientNode.light = SCNLight()
-        ambientNode.light?.type = .ambient
-        ambientNode.light?.color = UIColor.white
-        scene.rootNode.addChildNode(ambientNode)
 
         sceneView = SCNView(frame: view.bounds)
         sceneView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         sceneView.scene = scene
         sceneView.pointOfView = cameraNode
         sceneView.backgroundColor = .black
-        sceneView.showsStatistics = false
-        sceneView.allowsCameraControl = false
         view.addSubview(sceneView)
     }
 
-    private func makeGradientMaterial() -> SCNMaterial {
-        let size = CGSize(width: 1, height: 256)
-        let renderer = UIGraphicsImageRenderer(size: size)
-        let image = renderer.image { ctx in
-            let colors: [(CGFloat, UIColor)] = [
-                (0.0, UIColor(red: 0.05, green: 0.05, blue: 0.35, alpha: 1)),
-                (0.4, UIColor(red: 0.85, green: 0.55, blue: 0.15, alpha: 1)),
-                (0.7, UIColor(red: 0.60, green: 0.30, blue: 0.05, alpha: 1)),
-                (1.0, UIColor(red: 0.05, green: 0.05, blue: 0.05, alpha: 1)),
-            ]
-            let gradient = CGGradient(
-                colorsSpace: CGColorSpaceCreateDeviceRGB(),
-                colors: colors.map { $0.1.cgColor } as CFArray,
-                locations: colors.map { $0.0 }
-            )!
-            ctx.cgContext.drawLinearGradient(
-                gradient,
-                start: .zero,
-                end: CGPoint(x: 0, y: size.height),
-                options: []
-            )
+    private func makeGradientImage() -> UIImage {
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 1, height: 256))
+        return renderer.image { ctx in
+            let colors = [UIColor.darkGray.cgColor, UIColor.lightGray.cgColor] as CFArray
+            let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: nil)!
+            ctx.cgContext.drawLinearGradient(gradient, start: CGPoint(x: 0, y: 0), end: CGPoint(x: 0, y: 256), options: [])
         }
-        let mat = SCNMaterial()
-        mat.diffuse.contents = image
-        mat.diffuse.wrapT = .repeat
-        mat.diffuse.wrapS = .repeat
-        mat.isDoubleSided = true
-        mat.lightingModel = .constant
-        return mat
     }
-
-    // MARK: - Overlay
 
     private func setupOverlay() {
         statusLabel = UILabel()
         statusLabel.numberOfLines = 0
         statusLabel.font = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         statusLabel.textColor = .white
-        statusLabel.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        statusLabel.backgroundColor = UIColor.black.withAlphaComponent(0.5)
         statusLabel.textAlignment = .center
-        statusLabel.text = " Product: \(productId) | 360° VR Showroom\n Move device or swipe to look around "
+        statusLabel.text = "Product: \(productId) | 360° VR Showroom\nMove device or swipe to look around"
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(statusLabel)
 
@@ -137,8 +94,6 @@ final class VRViewController: UIViewController {
             statusLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
         ])
     }
-
-    // MARK: - Motion / Input
 
     private func setupInput() {
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
@@ -150,24 +105,19 @@ final class VRViewController: UIViewController {
         guard motionManager.isDeviceMotionAvailable else { return }
         motionManager.deviceMotionUpdateInterval = 1.0 / 60.0
         motionManager.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: .main) { [weak self] motion, _ in
-            guard let self, let motion else { return }
-            let attitude = motion.attitude
-            self.cameraNode.eulerAngles = SCNVector3(
-                Float(-attitude.pitch),
-                Float(attitude.yaw),
-                Float(attitude.roll)
-            )
+            guard let self = self, let motion = motion else { return }
+            self.cameraNode.eulerAngles = SCNVector3(-motion.attitude.pitch, motion.attitude.yaw, motion.attitude.roll)
         }
     }
 
     @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
-        if gesture.state == .began { lastPanLocation = gesture.location(in: sceneView) }
         let location = gesture.location(in: sceneView)
-        let delta = CGPoint(x: location.x - lastPanLocation.x, y: location.y - lastPanLocation.y)
+        if gesture.state == .began { lastPanLocation = location }
+        let deltaX = Float(location.x - lastPanLocation.x)
+        let deltaY = Float(location.y - lastPanLocation.y)
         lastPanLocation = location
-        let sensitivity: Float = 0.005
-        cameraNode.eulerAngles.y += Float(delta.x) * sensitivity
-        cameraNode.eulerAngles.x += Float(delta.y) * sensitivity
-        cameraNode.eulerAngles.x = max(-.pi / 2, min(.pi / 2, cameraNode.eulerAngles.x))
+
+        cameraNode.eulerAngles.y -= deltaX * 0.005
+        cameraNode.eulerAngles.x -= deltaY * 0.005
     }
 }

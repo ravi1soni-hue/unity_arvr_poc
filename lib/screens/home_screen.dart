@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import '../models/product.dart';
 import '../providers/cart_provider.dart';
+import '../services/product_service.dart';
 import '../widgets/product_card.dart';
 import '../widgets/cart_badge.dart';
 
@@ -16,10 +17,36 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   String _selectedCategory = 'All';
   final List<String> _categories = ['All', 'Lighting', 'Fans', 'Furniture'];
+  
+  List<Product> _allProducts = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _loadProducts();
+    });
+  }
+
+  Future<void> _loadProducts() async {
+    if (!mounted) return;
+    setState(() => _loading = true);
+    
+    final productService = context.read<ProductService>();
+    final products = await productService.getProducts();
+    
+    if (mounted) {
+      setState(() {
+        _allProducts = products;
+        _loading = false;
+      });
+    }
+  }
 
   List<Product> get _filtered {
-    if (_selectedCategory == 'All') return Product.catalog;
-    return Product.catalog.where((p) => p.category == _selectedCategory).toList();
+    if (_selectedCategory == 'All') return _allProducts;
+    return _allProducts.where((p) => p.category == _selectedCategory).toList();
   }
 
   @override
@@ -34,40 +61,42 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       body: Column(
         children: [
-          _HeroBanner(),
+          const _HeroBanner(),
           _CategoryFilter(
             categories: _categories,
             selected: _selectedCategory,
             onSelect: (c) => setState(() => _selectedCategory = c),
           ),
           Expanded(
-            child: GridView.builder(
-              padding: const EdgeInsets.all(12),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 2,
-                childAspectRatio: 0.65,
-                crossAxisSpacing: 10,
-                mainAxisSpacing: 10,
-              ),
-              itemCount: _filtered.length,
-              itemBuilder: (ctx, i) {
-                final product = _filtered[i];
-                return ProductCard(
-                  product: product,
-                  onTap: () => context.push('/product/${product.id}'),
-                  onAddToCart: () {
-                    context.read<CartProvider>().addItem(product);
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text('${product.name} added to cart'),
-                        duration: const Duration(seconds: 2),
-                        action: SnackBarAction(label: 'View Cart', onPressed: () => context.push('/cart')),
-                      ),
+            child: _loading 
+              ? const Center(child: CircularProgressIndicator())
+              : GridView.builder(
+                  padding: const EdgeInsets.all(12),
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 2,
+                    childAspectRatio: 0.55, // Further increased height to prevent overflow
+                    crossAxisSpacing: 10,
+                    mainAxisSpacing: 10,
+                  ),
+                  itemCount: _filtered.length,
+                  itemBuilder: (ctx, i) {
+                    final product = _filtered[i];
+                    return ProductCard(
+                      product: product,
+                      onTap: () => context.push('/product/${product.id}'),
+                      onAddToCart: () {
+                        context.read<CartProvider>().addItem(product);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('${product.name} added to cart'),
+                            duration: const Duration(seconds: 2),
+                            action: SnackBarAction(label: 'View Cart', onPressed: () => context.push('/cart')),
+                          ),
+                        );
+                      },
                     );
                   },
-                );
-              },
-            ),
+                ),
           ),
         ],
       ),
@@ -76,6 +105,7 @@ class _HomeScreenState extends State<HomeScreen> {
 }
 
 class _HeroBanner extends StatelessWidget {
+  const _HeroBanner();
   @override
   Widget build(BuildContext context) {
     return Container(
