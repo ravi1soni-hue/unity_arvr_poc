@@ -7,11 +7,12 @@ import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
 import android.os.Bundle
-import android.util.Log
 import android.view.MotionEvent
 import android.view.Surface
+import android.widget.Button
 import android.widget.RelativeLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -23,7 +24,9 @@ import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.FloatBuffer
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
@@ -60,6 +63,13 @@ class ArActivity : AppCompatActivity() {
             setTextColor(0xFFFFFFFF.toInt())
         }
 
+        val markButton = Button(this).apply {
+            text = "Mark Item"
+            setOnClickListener {
+                sendMarkedDataToFlutter()
+            }
+        }
+
         val fullParams = RelativeLayout.LayoutParams(
             RelativeLayout.LayoutParams.MATCH_PARENT,
             RelativeLayout.LayoutParams.MATCH_PARENT
@@ -69,9 +79,37 @@ class ArActivity : AppCompatActivity() {
             RelativeLayout.LayoutParams.WRAP_CONTENT
         ).apply { addRule(RelativeLayout.ALIGN_PARENT_BOTTOM) }
 
+        val buttonParams = RelativeLayout.LayoutParams(
+            RelativeLayout.LayoutParams.WRAP_CONTENT,
+            RelativeLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            addRule(RelativeLayout.ALIGN_PARENT_TOP)
+            addRule(RelativeLayout.ALIGN_PARENT_RIGHT)
+            setMargins(0, 50, 50, 0)
+        }
+
         root.addView(glSurfaceView!!, fullParams)
         root.addView(statusText, bottomParams)
+        root.addView(markButton, buttonParams)
         setContentView(root)
+    }
+
+    private fun sendMarkedDataToFlutter() {
+        val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault())
+        val timestamp = sdf.format(Date())
+        
+        // Use the static channel reference from MainActivity
+        MainActivity.bridgeChannel?.invokeMethod("onNativeMessage", mapOf(
+            "message" to "Product $productId marked in AR at $timestamp",
+            "productId" to productId,
+            "markedData" to mapOf(
+                "action" to "ITEM_MARKED_ANDROID",
+                "timestamp" to timestamp,
+                "anchors" to (renderer?.getAnchorCount() ?: 0)
+            )
+        ))
+        
+        Toast.makeText(this, "Marked data sent to Flutter", Toast.LENGTH_SHORT).show()
     }
 
     override fun onResume() {
@@ -156,6 +194,8 @@ class ArCoreRenderer(
     private val viewMatrix = FloatArray(16)
     private val projMatrix = FloatArray(16)
     private val anchorMatrix = FloatArray(16)
+
+    fun getAnchorCount() = anchors.size
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         val textures = IntArray(1); GLES20.glGenTextures(1, textures, 0)

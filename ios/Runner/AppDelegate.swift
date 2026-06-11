@@ -35,7 +35,7 @@ import UIKit
 
             case "openArScreen":
                 if let fc = controller {
-                    self.present(ARViewController(productId: productId), from: fc)
+                    self.present(ARViewController(productId: productId, channel: methodChannel), from: fc)
                 }
                 methodChannel?.invokeMethod("onNativeMessage", arguments: [
                     "message":   "ARKit session started for \(productId)",
@@ -45,7 +45,7 @@ import UIKit
 
             case "openVrScreen":
                 if let fc = controller {
-                    self.present(VRViewController(productId: productId), from: fc)
+                    self.present(VRViewController(productId: productId, channel: methodChannel), from: fc)
                 }
                 methodChannel?.invokeMethod("onNativeMessage", arguments: [
                     "message":   "VR 360° showroom opened for \(productId)",
@@ -54,9 +54,8 @@ import UIKit
                 result(true)
 
             case "openUnityScene":
-                // Fixed: routes to UnityViewController, not VRViewController
                 if let fc = controller {
-                    self.present(UnityViewController(productId: productId), from: fc)
+                    self.present(UnityViewController(productId: productId, channel: methodChannel), from: fc)
                 }
                 methodChannel?.invokeMethod("onNativeMessage", arguments: [
                     "message":   "Unity showroom launched for \(productId)",

@@ -1,18 +1,21 @@
 import UIKit
 import SceneKit
 import CoreMotion
+import Flutter
 
 final class VRViewController: UIViewController {
 
     private let productId: String
+    private let channel: FlutterMethodChannel?
     private var sceneView: SCNView!
     private var cameraNode: SCNNode!
     private var motionManager: CMMotionManager!
     private var statusLabel: UILabel!
     private var lastPanLocation: CGPoint = .zero
 
-    init(productId: String) {
+    init(productId: String, channel: FlutterMethodChannel? = nil) {
         self.productId = productId
+        self.channel = channel
         super.init(nibName: nil, bundle: nil)
         title = "VR 360°"
     }
@@ -27,6 +30,10 @@ final class VRViewController: UIViewController {
             title: "Close", style: .done, target: self, action: #selector(close)
         )
 
+        navigationItem.rightBarButtonItem = UIBarButtonItem(
+            title: "Mark", style: .plain, target: self, action: #selector(markView)
+        )
+
         setupScene()
         setupOverlay()
         setupInput()
@@ -34,6 +41,22 @@ final class VRViewController: UIViewController {
 
     @objc private func close() {
         dismiss(animated: true)
+    }
+
+    @objc private func markView() {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        channel?.invokeMethod("onNativeMessage", arguments: [
+            "message": "VR View for \(productId) marked at \(timestamp)",
+            "productId": productId,
+            "markedData": [
+                "action": "VR_MARK",
+                "timestamp": timestamp
+            ]
+        ])
+
+        let alert = UIAlertController(title: "Marked", message: "VR state sent to Flutter", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
     }
 
     override func viewWillAppear(_ animated: Bool) {

@@ -1,17 +1,20 @@
 import UIKit
 import ARKit
 import SceneKit
+import Flutter
 
 final class ARViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
 
     private let productId: String
+    private let channel: FlutterMethodChannel?
     private var sceneView: ARSCNView!
     private var statusLabel: UILabel!
     private var planeCount = 0
     private var anchorCount = 0
 
-    init(productId: String) {
+    init(productId: String, channel: FlutterMethodChannel? = nil) {
         self.productId = productId
+        self.channel = channel
         super.init(nibName: nil, bundle: nil)
         title = "AR Preview"
     }
@@ -25,9 +28,12 @@ final class ARViewController: UIViewController, ARSCNViewDelegate, ARSessionDele
         navigationItem.leftBarButtonItem = UIBarButtonItem(
             title: "Close", style: .done, target: self, action: #selector(close)
         )
-        navigationItem.rightBarButtonItem = UIBarButtonItem(
-            title: "Reset", style: .plain, target: self, action: #selector(resetSession)
-        )
+
+        let resetBtn = UIBarButtonItem(title: "Reset", style: .plain, target: self, action: #selector(resetSession))
+        let markBtn = UIBarButtonItem(title: "Mark Item", style: .plain, target: self, action: #selector(markItem))
+        markBtn.tintColor = .systemOrange
+
+        navigationItem.rightBarButtonItems = [resetBtn, markBtn]
 
         if ARWorldTrackingConfiguration.isSupported {
             setupARView()
@@ -38,6 +44,24 @@ final class ARViewController: UIViewController, ARSCNViewDelegate, ARSessionDele
 
     @objc private func close() {
         dismiss(animated: true)
+    }
+
+    @objc private func markItem() {
+        // Send data back to Flutter
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        channel?.invokeMethod("onNativeMessage", arguments: [
+            "message": "Product \(productId) marked at \(timestamp)",
+            "productId": productId,
+            "markedData": [
+                "action": "ITEM_MARKED",
+                "timestamp": timestamp,
+                "anchors": anchorCount
+            ]
+        ])
+
+        let alert = UIAlertController(title: "Marked!", message: "Data sent back to Flutter.", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
     }
 
     override func viewWillAppear(_ animated: Bool) {

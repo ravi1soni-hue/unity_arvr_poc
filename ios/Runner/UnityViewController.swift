@@ -1,42 +1,35 @@
 import UIKit
+import Flutter
 
 /**
  * Unity Showroom View Controller.
- *
- * Architecture: Flutter → MethodChannel → AppDelegate → UnityViewController → Unity runtime
- *
- * Runtime detection via NSClassFromString means this compiles without UnityFramework
- * embedded. When the framework IS added, the player is loaded and lifecycle events
- * (pause/resume/unload) are forwarded via a stored AnyObject reference so the
- * Unity engine behaves correctly during foreground/background transitions.
- *
- * To activate Unity integration:
- *   1. Open your Unity project (2019.3+)
- *   2. File → Build Settings → iOS → Export
- *   3. Drag UnityFramework.framework into Xcode project
- *   4. Set Embed & Sign in General → Frameworks, Libraries, and Embedded Content
- *   5. Rebuild — Unity scene loads here automatically
  */
 final class UnityViewController: UIViewController {
 
     private let productId: String
-    // Stored as AnyObject so this file compiles without UnityFramework on the classpath.
-    // When the framework is linked this holds the UnityFramework singleton instance.
+    private let channel: FlutterMethodChannel?
     private var unityFramework: AnyObject? = nil
 
-    init(productId: String) {
+    init(productId: String, channel: FlutterMethodChannel? = nil) {
         self.productId = productId
+        self.channel = channel
         super.init(nibName: nil, bundle: nil)
         title = "Unity Showroom"
     }
 
     required init?(coder: NSCoder) { fatalError("not implemented") }
 
-    // MARK: - Lifecycle
-
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = UIColor(red: 0.05, green: 0.07, blue: 0.09, alpha: 1)
+
+        navigationItem.leftBarButtonItem = UIBarButtonItem(
+            title: "Close", style: .done, target: self, action: #selector(close)
+        )
+
+        navigationItem.rightBarButtonItem = UIBarButtonItem(
+            title: "Mark", style: .plain, target: self, action: #selector(markInUnity)
+        )
 
         if isUnityFrameworkLinked() {
             attachUnityFramework()
@@ -45,8 +38,27 @@ final class UnityViewController: UIViewController {
         }
     }
 
-    // Unity must be paused before the view disappears to let the engine
-    // complete its current frame before the render surface is invalidated
+    @objc private func close() {
+        dismiss(animated: true)
+    }
+
+    @objc private func markInUnity() {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        channel?.invokeMethod("onNativeMessage", arguments: [
+            "message": "Unity item \(productId) marked at \(timestamp)",
+            "productId": productId,
+            "markedData": [
+                "action": "UNITY_MARK",
+                "timestamp": timestamp,
+                "platform": "ios"
+            ]
+        ])
+
+        let alert = UIAlertController(title: "Unity Marked", message: "Sent back to Flutter", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
+    }
+
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         unityFramework?.perform(NSSelectorFromString("pause:"), with: NSNumber(value: true))
@@ -62,13 +74,9 @@ final class UnityViewController: UIViewController {
         unityFramework = nil
     }
 
-    // MARK: - Unity detection
-
     private func isUnityFrameworkLinked() -> Bool {
         return NSClassFromString("UnityFramework") != nil
     }
-
-    // MARK: - Unity attachment
 
     private func attachUnityFramework() {
         guard let bundlePath = Bundle.main.path(
@@ -90,25 +98,10 @@ final class UnityViewController: UIViewController {
         }
 
         unityFramework = fw
-
-        // Set data bundle so Unity can locate its assets
-        fw.perform(
-            NSSelectorFromString("setDataBundleId:"),
-            with: "com.unity3d.framework"
-        )
-
-        // Register this VC as the Unity app controller delegate
+        fw.perform(NSSelectorFromString("setDataBundleId:"), with: "com.unity3d.framework")
         fw.perform(NSSelectorFromString("register:"), with: self)
+        fw.perform(NSSelectorFromString("runEmbeddedWithArgc:argv:appLaunchOpts:"), with: NSNumber(value: CommandLine.argc), with: CommandLine.unsafeArgv, with: nil)
 
-        // Boot the Unity engine
-        fw.perform(
-            NSSelectorFromString("runEmbeddedWithArgc:argv:appLaunchOpts:"),
-            with: NSNumber(value: CommandLine.argc),
-            with: CommandLine.unsafeArgv,
-            with: nil
-        )
-
-        // Attach Unity's root view
         if let appController = fw.perform(NSSelectorFromString("appController"))?.takeUnretainedValue(),
            let rootView = (appController as AnyObject).perform(NSSelectorFromString("rootView"))?.takeUnretainedValue() as? UIView {
             view.addSubview(rootView)
@@ -116,16 +109,8 @@ final class UnityViewController: UIViewController {
             rootView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         }
 
-        // Send product context into the Unity C# scene
-        fw.perform(
-            NSSelectorFromString("sendMessageToGO:functionName:message:"),
-            with: "ProductBridge",
-            with: "OnProductReceived",
-            with: productId
-        )
+        fw.perform(NSSelectorFromString("sendMessageToGO:functionName:message:"), with: "ProductBridge", with: "OnProductReceived", with: productId)
     }
-
-    // MARK: - Fallback UI
 
     private func showReadyState() {
         let scroll = UIScrollView()
@@ -154,21 +139,15 @@ final class UnityViewController: UIViewController {
         stack.addArrangedSubview(label("⬡", size: 64, color: UIColor(red: 0, green: 0.74, blue: 0.83, alpha: 1)))
         stack.addArrangedSubview(label("Unity 3D Showroom", size: 22, color: .white, bold: true))
         stack.addArrangedSubview(label("Product: \(productId)", size: 14, color: .lightGray))
+
+        let testBtn = UIButton(type: .system)
+        testBtn.setTitle("Test Marking (No Framework)", for: .normal)
+        testBtn.addTarget(self, action: #selector(markInUnity), for: .touchUpInside)
+        stack.addArrangedSubview(testBtn)
+
         stack.addArrangedSubview(separator())
         stack.addArrangedSubview(statusRow("Native bridge", "CONNECTED ✓", color: UIColor(red: 0.4, green: 0.8, blue: 0.4, alpha: 1)))
-        stack.addArrangedSubview(statusRow("Unity framework", "pending export", color: UIColor(red: 1, green: 0.65, blue: 0.15, alpha: 1)))
         stack.addArrangedSubview(separator())
-        stack.addArrangedSubview(label("To activate:", size: 13, color: .white, bold: true))
-        let steps = [
-            "1. Open your Unity project",
-            "2. File → Build Settings → iOS → Export",
-            "3. Drag UnityFramework.framework into Xcode",
-            "4. Set Embed & Sign in General → Frameworks",
-            "5. Rebuild — scene loads here automatically",
-        ]
-        for step in steps { stack.addArrangedSubview(label(step, size: 12, color: UIColor(red: 0.47, green: 0.56, blue: 0.61, alpha: 1))) }
-        stack.addArrangedSubview(progressView())
-        stack.addArrangedSubview(label("Integration: 65% complete", size: 11, color: .darkGray))
 
         let backBtn = UIButton(type: .system)
         backBtn.setTitle("← Back to Product", for: .normal)
@@ -176,9 +155,13 @@ final class UnityViewController: UIViewController {
         stack.addArrangedSubview(backBtn)
     }
 
-    @objc private func goBack() { navigationController?.popViewController(animated: true) }
-
-    // MARK: - Helpers
+    @objc private func goBack() {
+        if let nav = navigationController {
+            nav.popViewController(animated: true)
+        } else {
+            dismiss(animated: true)
+        }
+    }
 
     private func label(_ text: String, size: CGFloat, color: UIColor, bold: Bool = false) -> UILabel {
         let l = UILabel()
@@ -205,13 +188,5 @@ final class UnityViewController: UIViewController {
         v.heightAnchor.constraint(equalToConstant: 1).isActive = true
         v.translatesAutoresizingMaskIntoConstraints = false
         return v
-    }
-
-    private func progressView() -> UIProgressView {
-        let p = UIProgressView(progressViewStyle: .default)
-        p.progress = 0.65
-        p.tintColor = UIColor(red: 0, green: 0.74, blue: 0.83, alpha: 1)
-        p.widthAnchor.constraint(equalToConstant: 200).isActive = true
-        return p
     }
 }

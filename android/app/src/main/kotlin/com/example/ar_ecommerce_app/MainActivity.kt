@@ -7,14 +7,18 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     private val channelName = "com.example.ar_ecommerce/native"
-    private lateinit var bridgeChannel: MethodChannel
+
+    companion object {
+        var bridgeChannel: MethodChannel? = null
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        bridgeChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+        val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+        bridgeChannel = channel
 
-        bridgeChannel.setMethodCallHandler { call, result ->
+        channel.setMethodCallHandler { call, result ->
             val productId = call.argument<String>("productId") ?: "unknown"
             when (call.method) {
                 "pingNative" -> {
@@ -28,7 +32,7 @@ class MainActivity : FlutterActivity() {
                 "openArScreen" -> {
                     startActivity(Intent(this, ArActivity::class.java)
                         .putExtra("productId", productId))
-                    bridgeChannel.invokeMethod("onNativeMessage", mapOf(
+                    channel.invokeMethod("onNativeMessage", mapOf(
                         "message" to "ARCore session started for $productId",
                         "productId" to productId,
                     ))
@@ -38,7 +42,7 @@ class MainActivity : FlutterActivity() {
                 "openVrScreen" -> {
                     startActivity(Intent(this, VrActivity::class.java)
                         .putExtra("productId", productId))
-                    bridgeChannel.invokeMethod("onNativeMessage", mapOf(
+                    channel.invokeMethod("onNativeMessage", mapOf(
                         "message" to "VR 360° showroom opened for $productId",
                         "productId" to productId,
                     ))
@@ -48,7 +52,7 @@ class MainActivity : FlutterActivity() {
                 "openUnityScene" -> {
                     startActivity(Intent(this, UnityActivity::class.java)
                         .putExtra("productId", productId))
-                    bridgeChannel.invokeMethod("onNativeMessage", mapOf(
+                    channel.invokeMethod("onNativeMessage", mapOf(
                         "message" to "Unity showroom launched for $productId",
                         "productId" to productId,
                     ))
@@ -58,5 +62,10 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        bridgeChannel = null
     }
 }

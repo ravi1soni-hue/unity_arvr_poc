@@ -1,11 +1,6 @@
 package com.example.ar_ecommerce_app
 
 import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.LinearGradient
-import android.graphics.Paint
-import android.graphics.Shader
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -16,13 +11,15 @@ import android.opengl.Matrix
 import android.os.Bundle
 import android.view.GestureDetector
 import android.view.MotionEvent
+import android.widget.Button
 import android.widget.RelativeLayout
-import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.FloatBuffer
-import java.nio.ShortBuffer
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
@@ -32,16 +29,43 @@ class VrActivity : AppCompatActivity(), SensorEventListener {
     private var renderer: VrSphereRenderer? = null
     private lateinit var sensorManager: SensorManager
     private var rotationSensor: Sensor? = null
+    private var productId = "unknown"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val productId = intent.getStringExtra("productId") ?: "unknown"
+        productId = intent.getStringExtra("productId") ?: "unknown"
+        
+        val root = RelativeLayout(this)
         
         renderer = VrSphereRenderer()
         glSurfaceView = GLSurfaceView(this).apply {
             setEGLContextClientVersion(2)
             setRenderer(renderer)
         }
+
+        val markButton = Button(this).apply {
+            text = "Mark VR View"
+            setOnClickListener {
+                sendMarkedDataToFlutter()
+            }
+        }
+
+        val fullParams = RelativeLayout.LayoutParams(
+            RelativeLayout.LayoutParams.MATCH_PARENT,
+            RelativeLayout.LayoutParams.MATCH_PARENT
+        )
+        val buttonParams = RelativeLayout.LayoutParams(
+            RelativeLayout.LayoutParams.WRAP_CONTENT,
+            RelativeLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            addRule(RelativeLayout.ALIGN_PARENT_TOP)
+            addRule(RelativeLayout.ALIGN_PARENT_RIGHT)
+            setMargins(0, 50, 50, 0)
+        }
+
+        root.addView(glSurfaceView!!, fullParams)
+        root.addView(markButton, buttonParams)
+        setContentView(root)
 
         val gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
@@ -50,9 +74,25 @@ class VrActivity : AppCompatActivity(), SensorEventListener {
         })
         glSurfaceView?.setOnTouchListener { _, event -> gestureDetector.onTouchEvent(event); true }
 
-        setContentView(glSurfaceView)
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         rotationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+    }
+
+    private fun sendMarkedDataToFlutter() {
+        val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault())
+        val timestamp = sdf.format(Date())
+        
+        MainActivity.bridgeChannel?.invokeMethod("onNativeMessage", mapOf(
+            "message" to "Product $productId marked in VR at $timestamp",
+            "productId" to productId,
+            "markedData" to mapOf(
+                "action" to "ITEM_MARKED_VR_ANDROID",
+                "timestamp" to timestamp,
+                "view" to "360_PANORAMA"
+            )
+        ))
+        
+        Toast.makeText(this, "VR Data sent to Flutter", Toast.LENGTH_SHORT).show()
     }
 
     override fun onResume() {

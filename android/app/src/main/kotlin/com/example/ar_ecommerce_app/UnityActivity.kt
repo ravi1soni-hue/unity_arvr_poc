@@ -3,35 +3,25 @@ package com.example.ar_ecommerce_app
 import android.graphics.Color
 import android.os.Bundle
 import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Unity Showroom Activity.
- *
- * Architecture: Flutter → MethodChannel → UnityActivity → UnityPlayer
- *
- * Runtime detection via Class.forName means this compiles without the Unity
- * library present. When unityLibrary is added as a Gradle module, the player
- * is instantiated and lifecycle events are forwarded via reflection so the
- * Unity engine pauses/resumes/quits correctly alongside the activity.
- *
- * To activate Unity integration:
- *   1. Open your Unity project (2019.3+)
- *   2. Build Settings → Android → Export as Gradle Project
- *   3. Copy the exported 'unityLibrary' folder into android/
- *   4. Add  include ':unityLibrary'  to android/settings.gradle
- *   5. Add  implementation project(':unityLibrary')  to app/build.gradle.kts
- *   6. Rebuild — UnityPlayer is auto-detected here and the scene loads
  */
 class UnityActivity : AppCompatActivity() {
 
     private var productId = "unknown"
-    // Stored as Any so this file compiles without the Unity library on the classpath.
-    // When the library is linked, this holds a com.unity3d.player.UnityPlayer instance.
     private var unityPlayer: Any? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -46,8 +36,23 @@ class UnityActivity : AppCompatActivity() {
         }
     }
 
-    // Unity docs: pause() must be called BEFORE super.onPause() so the engine can
-    // reach a synchronisation point before the window surface is destroyed.
+    private fun sendMarkedDataToFlutter() {
+        val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault())
+        val timestamp = sdf.format(Date())
+        
+        MainActivity.bridgeChannel?.invokeMethod("onNativeMessage", mapOf(
+            "message" to "Unity Product $productId marked at $timestamp",
+            "productId" to productId,
+            "markedData" to mapOf(
+                "action" to "UNITY_ITEM_MARKED",
+                "timestamp" to timestamp,
+                "engine" to "UNITY"
+            )
+        ))
+        
+        Toast.makeText(this, "Unity Data sent back!", Toast.LENGTH_SHORT).show()
+    }
+
     override fun onPause() {
         invokeUnityLifecycle("pause")
         super.onPause()
@@ -64,8 +69,6 @@ class UnityActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    // ── Private helpers ───────────────────────────────────────────────────────
-
     private fun isUnityLibraryLinked(): Boolean {
         return try { Class.forName("com.unity3d.player.UnityPlayer"); true }
         catch (_: ClassNotFoundException) { false }
@@ -79,19 +82,33 @@ class UnityActivity : AppCompatActivity() {
                 .newInstance(this)
             unityPlayer = player
 
-            // UnityPlayer extends FrameLayout; use it directly as the content view
-            val view = playerClass.getMethod("getView").invoke(player) as android.view.View
-            setContentView(view)
-            view.requestFocus()
+            val unityView = playerClass.getMethod("getView").invoke(player) as View
+            
+            // Create a layout to hold Unity view + a native button overlay
+            val container = FrameLayout(this)
+            container.addView(unityView)
+            
+            val markBtn = Button(this).apply {
+                text = "Mark in Unity"
+                setOnClickListener { sendMarkedDataToFlutter() }
+            }
+            val btnParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.END
+            ).apply { setMargins(0, 50, 50, 0) }
+            
+            container.addView(markBtn, btnParams)
+            setContentView(container)
+            
+            unityView.requestFocus()
 
-            // Pass product context to the Unity C# scene via UnitySendMessage (static call)
             playerClass.getMethod(
                 "UnitySendMessage",
                 String::class.java, String::class.java, String::class.java
             ).invoke(null, "ProductBridge", "OnProductReceived", productId)
 
         } catch (e: Exception) {
-            // Unity library is linked but instantiation failed — show diagnostic screen
             unityPlayer = null
             showReadyState()
         }
@@ -126,51 +143,9 @@ class UnityActivity : AppCompatActivity() {
             setPadding(0, 16, 0, 8)
         })
 
-        root.addView(TextView(this).apply {
-            text = "Product: $productId"
-            textSize = 14f
-            gravity = Gravity.CENTER
-            setTextColor(Color.parseColor("#90A4AE"))
-        })
-
-        root.addView(TextView(this).apply {
-            text = "─────────────────────────"
-            gravity = Gravity.CENTER
-            setTextColor(Color.parseColor("#37474F"))
-            setPadding(0, 24, 0, 16)
-        })
-
-        root.addView(TextView(this).apply {
-            text = "Native bridge: CONNECTED"
-            textSize = 13f
-            gravity = Gravity.CENTER
-            setTextColor(Color.parseColor("#66BB6A"))
-        })
-
-        root.addView(TextView(this).apply {
-            text = "Unity library: pending export"
-            textSize = 13f
-            gravity = Gravity.CENTER
-            setTextColor(Color.parseColor("#FFA726"))
-            setPadding(0, 4, 0, 0)
-        })
-
-        root.addView(TextView(this).apply {
-            text = "\nTo activate:\n" +
-                "1. Open your Unity project\n" +
-                "2. Build → Android → Export as Gradle project\n" +
-                "3. Add ':unityLibrary' to settings.gradle\n" +
-                "4. Add implementation project(':unityLibrary') to build.gradle.kts\n" +
-                "5. Rebuild — Unity scene loads here automatically"
-            textSize = 12f
-            setTextColor(Color.parseColor("#78909C"))
-            setPadding(0, 16, 0, 24)
-        })
-
-        root.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            isIndeterminate = false
-            progress = 65
-            max = 100
+        root.addView(Button(this).apply {
+            text = "Test Marking (No Unity)"
+            setOnClickListener { sendMarkedDataToFlutter() }
         })
 
         root.addView(TextView(this).apply {
@@ -178,7 +153,7 @@ class UnityActivity : AppCompatActivity() {
             textSize = 11f
             gravity = Gravity.CENTER
             setTextColor(Color.parseColor("#546E7A"))
-            setPadding(0, 6, 0, 0)
+            setPadding(0, 30, 0, 0)
         })
 
         root.addView(Button(this).apply {
